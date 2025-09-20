@@ -1,0 +1,136 @@
+diff --git a/bible-scraper.py b/bible-scraper.py
+--- a/bible-scraper.py
++++ b/bible-scraper.py
+@@ -1,9 +1,9 @@
+-# (file header context not strictly needed in patch; hunks below apply by content)
++# Patch: clue-building repairs (backfill blanks, grammar normalize, category-safe openings)
+@@ def remove_answer_from_clue(clue: str, answer: str) -> str:
+-    if not clue:
+-        return clue
+-    pattern = re.compile(re.escape(answer), re.IGNORECASE)
+-    cleaned = pattern.sub("", clue)
+-    cleaned = re.sub(r"\s+", " ", cleaned)
+-    return cleaned.strip(",;:. ").strip()
++    if not clue:
++        return clue
++    pattern = re.compile(re.escape(answer), re.IGNORECASE)
++    cleaned = pattern.sub("", clue)
++    cleaned = re.sub(r"\s+", " ", cleaned)
++    return cleaned.strip(",;:. ").strip()
++
++def _backfill_bare_function_words(text: str) -> str:
++    """
++    If answer removal leaves dangling function words (e.g., 'the of', 'in the', 'at'),
++    backfill with a generic blank to preserve solvable structure.
++    """
++    if not text:
++        return text
++    patterns = [
++        r"\b(of|in|at|to|from|for|with|by)\s*(?=[,.;:]|\Z)",
++        r"\b(the|a|an)\s*(?=[,.;:]|\Z)",
++        r"\b(of|in|at|to|from|for|with|by)\s+the\s*(?=[,.;:]|\Z)",
++        r"\bthe\s+of\b",
++    ]
++    for pat in patterns:
++        text = re.sub(pat, lambda m: m.group(0).rstrip() + " ___", text, flags=re.IGNORECASE)
++    text = re.sub(r"\bthe\s+of\s+___\b", "the ___", text, flags=re.IGNORECASE)
++    text = re.sub(r"(___)\s+(___)", r"\1", text)
++    return text
++
++def _normalize_grammar(text: str) -> str:
++    """
++    Lightweight grammar/polish pass for clue fragments produced by template assembly.
++    """
++    if not text:
++        return text
++    t = text
++    t = re.sub(r"\b[Nn]ow\b", "", t)
++    t = re.sub(r"\s{2,}", " ", t)
++    t = re.sub(r"\s+([,.;:])", r"\1", t)
++    t = re.sub(r"([,.;:])([^\s])", r"\1 \2", t)
++    t = re.sub(r"\bWe\s+sees\b", "We see", t)
++    t = re.sub(r"\bWe\s+knows\b", "We know", t)
++    t = re.sub(r"\bThey\s+sees\b", "They see", t)
++    t = re.sub(r"\bThey\s+knows\b", "They know", t)
++    t = re.sub(r"\b(\w+)\s+\1\b", r"\1", t, flags=re.IGNORECASE)
++    t = re.sub(r"\b(the|a|an)\s+([,.;:])", r"\2", t, flags=re.IGNORECASE)
++    t = _backfill_bare_function_words(t)
++    t = re.sub(r"\s{2,}", " ", t).strip()
++    return t
++
++def _enforce_category_opening(category: str, body: str, *,
++                              role_phrase: Optional[str] = None,
++                              object_hypernym: str = "object") -> str:
++    """
++    Force consistent, helpful openings per category with minimal text surgery.
++    """
++    raw = body.strip()
++    if category == CATEGORY_PERSON:
++        lead = (role_phrase or "Figure")
++        return f"{lead} who {raw}"
++    if category == CATEGORY_PLACE:
++        return "Place where " + re.sub(r"^\s*where\s+", "", raw, flags=re.IGNORECASE)
++    if category == CATEGORY_OBJECT:
++        if not re.match(r"^\s*this\b", raw, flags=re.IGNORECASE):
++            raw = f"{object_hypernym} {raw}"
++        return "This " + raw.lstrip()
++    return raw
+@@ def extract_local_context(sent: Any, answer: str, window: int = 8) -> str:
+-    snippet = snippet.strip(" ,.;:-")
+-    return snippet
++    snippet = snippet.strip(" ,.;:-")
++    snippet = _backfill_bare_function_words(snippet)
++    return snippet
+@@ def finalize_clue(text: str) -> str:
+-    cleaned = re.sub(r"\s+", " ", text).strip(" ;,")
+-    if not cleaned:
+-        return ""
+-    if cleaned[-1] not in ".?!":
+-        cleaned = f"{cleaned}."
+-    if cleaned and cleaned[0].islower():
+-        cleaned = cleaned[0].upper() + cleaned[1:]
+-    return truncate_text(cleaned)
++    repaired = _normalize_grammar(_backfill_bare_function_words(text))
++    cleaned = re.sub(r"\s+", " ", repaired).strip(" ;,")
++    if not cleaned:
++        return ""
++    if cleaned[-1] not in ".?!":
++        cleaned = f"{cleaned}."
++    if cleaned and cleaned[0].islower():
++        cleaned = cleaned[0].upper() + cleaned[1:]
++    return truncate_text(cleaned)
+@@ def generate_person_clue(
+-    role = infer_role(candidate.word, context_words, payload.vocab)
+-    role_phrase = role.capitalize() if role else "Figure"
++    role = infer_role(candidate.word, context_words, payload.vocab)
++    role_phrase = (role.capitalize() if role and role.lower() not in {"man", "woman"} else "Figure")
+@@ def generate_person_clue(
+-    clue = f"{role_phrase} who {clue_body}"
+-    clue = remove_answer_from_clue(clue, candidate.word)
+-    clue = finalize_clue(clue)
++    clue_raw = _enforce_category_opening(CATEGORY_PERSON, clue_body, role_phrase=role_phrase)
++    clue = remove_answer_from_clue(clue_raw, candidate.word)
++    clue = finalize_clue(clue)
+@@ def generate_place_clue(
+-    if not description:
+-        description = "is a location highlighted in this chapter"
+-    clue = f"Where {description}"
+-    clue = remove_answer_from_clue(clue, candidate.word)
+-    clue = finalize_clue(clue)
++    if not description:
++        description = "is a location highlighted in this chapter"
++    clue_raw = _enforce_category_opening(CATEGORY_PLACE, description)
++    clue = remove_answer_from_clue(clue_raw, candidate.word)
++    clue = finalize_clue(clue)
+@@ def generate_object_clue(
+-    if not description:
+-        description = "object highlighted in this passage"
+-    clue = remove_answer_from_clue(description, candidate.word)
+-    if clue and not clue.lower().startswith(("this", "these", "it", "symbol", "item")):
+-        clue = f"This {clue}" if not clue.lower().startswith("this ") else clue
+-    clue = finalize_clue(clue)
++    if not description:
++        description = "object highlighted in this passage"
++    clue_raw = _enforce_category_opening(CATEGORY_OBJECT, description, object_hypernym="object")
++    clue = remove_answer_from_clue(clue_raw, candidate.word)
++    clue = finalize_clue(clue)
