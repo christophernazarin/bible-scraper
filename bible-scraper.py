@@ -1,0 +1,1780 @@
+import argparse
+import concurrent.futures
+import datetime
+import html
+import json
+import math
+import os
+import random
+import re
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+try:
+    import numpy as np
+except ImportError as exc:
+    raise SystemExit("Missing dependency 'numpy'. Install with 'pip install numpy'.") from exc
+
+try:
+    import requests
+except ImportError as exc:
+    raise SystemExit("Missing dependency 'requests'. Install with 'pip install requests'.") from exc
+
+try:
+    import spacy
+    import spacy.cli
+except ImportError as exc:
+    raise SystemExit("Missing dependency 'spacy'. Install with 'pip install spacy'.") from exc
+
+try:
+    from rapidfuzz import fuzz
+except ImportError as exc:
+    raise SystemExit("Missing dependency 'rapidfuzz'. Install with 'pip install rapidfuzz'.") from exc
+
+try:
+    from wordfreq import zipf_frequency
+except ImportError as exc:
+    raise SystemExit("Missing dependency 'wordfreq'. Install with 'pip install wordfreq'.") from exc
+
+try:
+    import nltk
+    from nltk.corpus import stopwords, wordnet
+    from nltk.stem import SnowballStemmer
+except ImportError as exc:
+    raise SystemExit("Missing dependency 'nltk'. Install with 'pip install nltk'.") from exc
+
+for resource in ("stopwords", "wordnet", "omw-1.4"):
+    try:
+        nltk.data.find(f"corpora/{resource}")
+    except LookupError:
+        nltk.download(resource, quiet=True)
+
+
+@dataclass(frozen=True)
+class BookMetadata:
+    id: str
+    name: str
+    slug: str
+    chapters: int
+
+
+@dataclass
+class ChapterTiming:
+    book_id: str
+    chapter: int
+    fetch_seconds: float = 0.0
+    process_seconds: float = 0.0
+
+
+@dataclass
+class Candidate:
+    word: str
+    lemma: str
+    stem: str
+    pos: str
+    score: float
+    frequency: int
+    is_proper: bool
+    sentence: str
+    token_index: int
+    category: str
+    synset_lemmas: Set[str] = field(default_factory=set)
+    context_phrases: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ChapterPayload:
+    book_id: str
+    book_name: str
+    chapter: int
+    chapter_id: Optional[str]
+    text: str
+    timing: ChapterTiming
+    doc: Any = None
+    sentences: List[str] = field(default_factory=list)
+    vocab: Set[str] = field(default_factory=set)
+    token_counts: Counter = field(default_factory=Counter)
+    lemma_set: Set[str] = field(default_factory=set)
+
+
+@dataclass
+class ChapterResult:
+    book_id: str
+    book_name: str
+    chapter: int
+    summary: str
+    words: List[Tuple[str, str]]
+
+
+BOOKS: List[BookMetadata] = [
+    BookMetadata("GEN", "Genesis", "genesis", 50),
+    BookMetadata("EXO", "Exodus", "exodus", 40),
+    BookMetadata("LEV", "Leviticus", "leviticus", 27),
+    BookMetadata("NUM", "Numbers", "numbers", 36),
+    BookMetadata("DEU", "Deuteronomy", "deuteronomy", 34),
+    BookMetadata("JOS", "Joshua", "joshua", 24),
+    BookMetadata("JDG", "Judges", "judges", 21),
+    BookMetadata("RUT", "Ruth", "ruth", 4),
+    BookMetadata("1SA", "1 Samuel", "1-samuel", 31),
+    BookMetadata("2SA", "2 Samuel", "2-samuel", 24),
+    BookMetadata("1KI", "1 Kings", "1-kings", 22),
+    BookMetadata("2KI", "2 Kings", "2-kings", 25),
+    BookMetadata("1CH", "1 Chronicles", "1-chronicles", 29),
+    BookMetadata("2CH", "2 Chronicles", "2-chronicles", 36),
+    BookMetadata("EZR", "Ezra", "ezra", 10),
+    BookMetadata("NEH", "Nehemiah", "nehemiah", 13),
+    BookMetadata("EST", "Esther", "esther", 10),
+    BookMetadata("JOB", "Job", "job", 42),
+    BookMetadata("PSA", "Psalms", "psalms", 150),
+    BookMetadata("PRO", "Proverbs", "proverbs", 31),
+    BookMetadata("ECC", "Ecclesiastes", "ecclesiastes", 12),
+    BookMetadata("SNG", "Song of Solomon", "song-of-solomon", 8),
+    BookMetadata("ISA", "Isaiah", "isaiah", 66),
+    BookMetadata("JER", "Jeremiah", "jeremiah", 52),
+    BookMetadata("LAM", "Lamentations", "lamentations", 5),
+    BookMetadata("EZK", "Ezekiel", "ezekiel", 48),
+    BookMetadata("DAN", "Daniel", "daniel", 12),
+    BookMetadata("HOS", "Hosea", "hosea", 14),
+    BookMetadata("JOL", "Joel", "joel", 3),
+    BookMetadata("AMO", "Amos", "amos", 9),
+    BookMetadata("OBA", "Obadiah", "obadiah", 1),
+    BookMetadata("JON", "Jonah", "jonah", 4),
+    BookMetadata("MIC", "Micah", "micah", 7),
+    BookMetadata("NAM", "Nahum", "nahum", 3),
+    BookMetadata("HAB", "Habakkuk", "habakkuk", 3),
+    BookMetadata("ZEP", "Zephaniah", "zephaniah", 3),
+    BookMetadata("HAG", "Haggai", "haggai", 2),
+    BookMetadata("ZEC", "Zechariah", "zechariah", 14),
+    BookMetadata("MAL", "Malachi", "malachi", 4),
+    BookMetadata("MAT", "Matthew", "matthew", 28),
+    BookMetadata("MRK", "Mark", "mark", 16),
+    BookMetadata("LUK", "Luke", "luke", 24),
+    BookMetadata("JHN", "John", "john", 21),
+    BookMetadata("ACT", "Acts", "acts", 28),
+    BookMetadata("ROM", "Romans", "romans", 16),
+    BookMetadata("1CO", "1 Corinthians", "1-corinthians", 16),
+    BookMetadata("2CO", "2 Corinthians", "2-corinthians", 13),
+    BookMetadata("GAL", "Galatians", "galatians", 6),
+    BookMetadata("EPH", "Ephesians", "ephesians", 6),
+    BookMetadata("PHP", "Philippians", "philippians", 4),
+    BookMetadata("COL", "Colossians", "colossians", 4),
+    BookMetadata("1TH", "1 Thessalonians", "1-thessalonians", 5),
+    BookMetadata("2TH", "2 Thessalonians", "2-thessalonians", 3),
+    BookMetadata("1TI", "1 Timothy", "1-timothy", 6),
+    BookMetadata("2TI", "2 Timothy", "2-timothy", 4),
+    BookMetadata("TIT", "Titus", "titus", 3),
+    BookMetadata("PHM", "Philemon", "philemon", 1),
+    BookMetadata("HEB", "Hebrews", "hebrews", 13),
+    BookMetadata("JAS", "James", "james", 5),
+    BookMetadata("1PE", "1 Peter", "1-peter", 5),
+    BookMetadata("2PE", "2 Peter", "2-peter", 3),
+    BookMetadata("1JN", "1 John", "1-john", 5),
+    BookMetadata("2JN", "2 John", "2-john", 1),
+    BookMetadata("3JN", "3 John", "3-john", 1),
+    BookMetadata("JUD", "Jude", "jude", 1),
+    BookMetadata("REV", "Revelation", "revelation", 22),
+]
+
+BOOK_BY_ID: Dict[str, BookMetadata] = {book.id: book for book in BOOKS}
+BOOK_INDEX: Dict[str, int] = {book.id: idx for idx, book in enumerate(BOOKS)}
+
+POS_WEIGHTS: Dict[str, float] = {
+    "NOUN": 3.0,
+    "PROPN": 2.7,
+    "VERB": 2.3,
+    "ADJ": 1.8,
+}
+
+FEMALE_NAMES: Set[str] = {
+    "EVE",
+    "SARAH",
+    "REBEKAH",
+    "RACHEL",
+    "LEAH",
+    "RUTH",
+    "NAOMI",
+    "ESTHER",
+    "HANNAH",
+    "DEBORAH",
+    "BATHSHEBA",
+    "ABIGAIL",
+    "ELIZABETH",
+    "MARY",
+    "MARTHA",
+    "TABITHA",
+    "LYDIA",
+    "PRISCILLA",
+    "ANNA",
+    "SAPPHIRA",
+    "DINAH",
+    "ZIPPORAH",
+    "MIRIAM",
+    "HAGAR",
+    "JAEL",
+    "RIZPAH",
+    "ATHALIAH",
+    "JEZEBEL",
+    "LOIS",
+    "EUNICE",
+    "PHOEBE",
+    "CHLOE",
+    "JULIA",
+    "DORCAS",
+}
+
+DEFAULT_NAME_ROLES: Dict[str, str] = {
+    "ABRAHAM": "patriarch",
+    "ISAAC": "patriarch",
+    "JACOB": "patriarch",
+    "ISRAEL": "nation",
+    "MOSES": "prophet",
+    "AARON": "priest",
+    "JOSHUA": "commander",
+    "CALEB": "scout",
+    "SAMUEL": "judge",
+    "SAUL": "king",
+    "DAVID": "king",
+    "SOLOMON": "king",
+    "BATHSHEBA": "queen",
+    "ESTHER": "queen",
+    "MORDECAI": "guardian",
+    "NEHEMIAH": "governor",
+    "EZRA": "scribe",
+    "ISAIAH": "prophet",
+    "JEREMIAH": "prophet",
+    "EZEKIEL": "prophet",
+    "DANIEL": "prophet",
+    "HOSEA": "prophet",
+    "JOEL": "prophet",
+    "AMOS": "prophet",
+    "MICAH": "prophet",
+    "NAHUM": "prophet",
+    "HABAKKUK": "prophet",
+    "ZEPHANIAH": "prophet",
+    "HAGGAI": "prophet",
+    "ZECHARIAH": "prophet",
+    "MALACHI": "prophet",
+    "MATTHEW": "apostle",
+    "MARK": "evangelist",
+    "LUKE": "writer",
+    "JOHN": "apostle",
+    "PAUL": "apostle",
+    "PETER": "apostle",
+    "JAMES": "apostle",
+    "TIMOTHY": "coworker",
+    "TITUS": "messenger",
+    "PHILEMON": "patron",
+    "SILAS": "companion",
+    "BARNABAS": "companion",
+    "STEPHEN": "martyr",
+    "PHILIP": "evangelist",
+    "APOLLOS": "teacher",
+    "JESUS": "teacher",
+    "MARY": "woman",
+    "MARTHA": "woman",
+    "MAGDALENE": "witness",
+    "THOMAS": "apostle",
+    "ANDREW": "apostle",
+    "ELIJAH": "prophet",
+    "ELISHA": "prophet",
+    "GIDEON": "judge",
+    "DEBORAH": "judge",
+    "BARAK": "commander",
+    "JEPHTHAH": "judge",
+    "SAMPSON": "judge",
+    "SAMSON": "judge",
+    "JONAH": "prophet",
+    "JOB": "sufferer",
+    "NOAH": "builder",
+    "ENOS": "patriarch",
+    "ENOCH": "patriarch",
+    "SIMEON": "patriarch",
+    "JUDAH": "patriarch",
+    "LEVI": "patriarch",
+    "REUBEN": "patriarch",
+    "BENJAMIN": "patriarch",
+    "GOLIATH": "giant",
+    "CAIAPHAS": "high priest",
+}
+
+SPECIAL_NAME_RULES: Dict[str, List[Tuple[Set[str], str]]] = {
+    "JOHN": [
+        ({"BAPTIZE", "BAPTIST", "JORDAN", "WILDERNESS", "LOCUSTS", "CAMEL", "HEROD", "PRISON"}, "Baptist"),
+        ({"ZEBEDEE", "BOANERGES", "BROTHER", "GALILEE", "FISHERMEN", "NETS", "SEA"}, "apostle"),
+        ({"ELDER"}, "elder"),
+    ],
+    "JAMES": [
+        ({"ZEBEDEE", "JOHN", "BOANERGES", "GALILEE"}, "son of Zebedee"),
+        ({"ALPHAEUS"}, "son of Alphaeus"),
+    ],
+    "HEROD": [
+        ({"ANTIPAS"}, "Antipas"),
+        ({"AGRIPPA"}, "Agrippa"),
+    ],
+    "MARY": [
+        ({"MAGDALENE", "DEMON", "TOMB", "STONE"}, "Magdalene"),
+        ({"BETHANY", "MARTHA", "LAZARUS"}, "of Bethany"),
+        ({"JESUS", "NAZARETH", "NATIVITY", "MANGER", "GABRIEL"}, "mother of Jesus"),
+    ],
+    "JUDAS": [
+        ({"ISCARIOT", "BETRAY"}, "Iscariot"),
+        ({"JAMES", "THADDAEUS"}, "son of James"),
+    ],
+    "JOSEPH": [
+        ({"DREAM", "EGYPT", "PHARAOH", "GRAIN"}, "overseer in Egypt"),
+        ({"MARY", "MANGER", "NAZARETH"}, "guardian of Jesus"),
+    ],
+    "PILATE": [
+        ({"TRIAL", "CRUCIFY", "GOVERNOR", "JESUS"}, "governor"),
+    ],
+    "NICODEMUS": [
+        ({"NIGHT", "PHARISEE", "TEACHER"}, "Pharisee"),
+    ],
+}
+
+HINT_WORDS: Dict[str, str] = {
+    "NIGHT": "by night",
+    "DAY": "in the day",
+    "MORNING": "in the morning",
+    "EVENING": "at evening",
+    "SYNAGOGUE": "in the synagogue",
+    "TEMPLE": "in the temple",
+    "PRISON": "in prison",
+    "PASSOVER": "at Passover",
+    "GALILEE": "in Galilee",
+    "JORDAN": "at the Jordan",
+    "WILDERNESS": "in the wilderness",
+    "BETHANY": "at Bethany",
+    "BETHLEHEM": "at Bethlehem",
+    "TOMB": "at the tomb",
+    "SEA": "by the sea",
+    "BOAT": "in the boat",
+    "MOUNTAIN": "on the mountain",
+    "ALTAR": "at the altar",
+    "CAMP": "in the camp",
+    "COURT": "in the court",
+    "BATTLE": "in battle",
+    "TRIAL": "at the trial",
+    "FEAST": "at the feast",
+    "HARVEST": "during harvest",
+    "JERUSALEM": "in Jerusalem",
+    "EGYPT": "in Egypt",
+    "ROME": "at Rome",
+    "ANTIOCH": "at Antioch",
+}
+
+WORDNET_POS_MAP: Dict[str, str] = {"NOUN": "n", "PROPN": "n", "VERB": "v", "ADJ": "a"}
+
+VERB_IRREGULAR_MAP: Dict[str, str] = {
+    "be": "is",
+    "have": "has",
+    "do": "does",
+    "go": "goes",
+    "say": "says",
+    "come": "comes",
+    "see": "sees",
+    "make": "makes",
+    "take": "takes",
+    "give": "gives",
+    "begin": "begins",
+    "bring": "brings",
+    "eat": "eats",
+    "drink": "drinks",
+    "write": "writes",
+    "rise": "rises",
+    "fall": "falls",
+    "stand": "stands",
+    "teach": "teaches",
+    "preach": "preaches",
+    "call": "calls",
+    "lead": "leads",
+    "ask": "asks",
+    "answer": "answers",
+    "know": "knows",
+    "walk": "walks",
+    "build": "builds",
+    "send": "sends",
+    "speak": "speaks",
+    "hear": "hears",
+    "keep": "keeps",
+    "hold": "holds",
+    "meet": "meets",
+}
+
+TAG_RE = re.compile(r"<[^>]+>")
+NON_ALPHA_RE = re.compile(r"[^A-Z]")
+MAX_CLUE_LENGTH = 120
+REQUEST_TIMEOUT = 30
+
+CATEGORY_PERSON = "PERSON"
+CATEGORY_PLACE = "PLACE"
+CATEGORY_OBJECT = "OBJECT"
+CATEGORY_THEOLOGY = "THEOLOGY"
+CATEGORY_OTHER = "OTHER"
+
+CATEGORY_BASE_WEIGHTS: Dict[str, float] = {
+    CATEGORY_OBJECT: 4.0,
+    CATEGORY_PERSON: 3.6,
+    CATEGORY_PLACE: 3.3,
+    CATEGORY_THEOLOGY: 3.1,
+    CATEGORY_OTHER: 1.4,
+}
+
+CATEGORY_PRIORITY_ORDER: List[str] = [
+    CATEGORY_OBJECT,
+    CATEGORY_PERSON,
+    CATEGORY_PLACE,
+    CATEGORY_THEOLOGY,
+    CATEGORY_OTHER,
+]
+
+CATEGORY_REQUIREMENTS: List[Tuple[str, int]] = [
+    (CATEGORY_OBJECT, 4),
+    (CATEGORY_PERSON, 3),
+    (CATEGORY_PLACE, 3),
+    (CATEGORY_THEOLOGY, 3),
+]
+
+TARGET_WORD_COUNT = 18
+MIN_WORD_COUNT = 15
+MAX_WORD_COUNT = 20
+
+BANNED_WORDS: Set[str] = {
+    "SAID",
+    "SAY",
+    "SAYS",
+    "ANSWER",
+    "ANSWERED",
+    "ANSWERS",
+    "ANSWERING",
+    "THING",
+    "THINGS",
+    "CONTEXT",
+    "HERE",
+    "THERE",
+    "THEN",
+    "NOW",
+    "THUS",
+    "THEREFORE",
+    "MOREOVER",
+    "WHEREFORE",
+    "WHENCE",
+    "HENCE",
+    "HITHER",
+    "WHITHER",
+    "ALSO",
+    "EVEN",
+    "JUST",
+}
+
+THEOLOGICAL_TERMS: Set[str] = {
+    "ATONEMENT",
+    "BAPTISM",
+    "BELIEF",
+    "BELIEVE",
+    "BLOOD",
+    "COVENANT",
+    "CROSS",
+    "DARKNESS",
+    "DEATH",
+    "ETERNAL",
+    "ETERNITY",
+    "FAITH",
+    "FLESH",
+    "FORGIVENESS",
+    "GLORY",
+    "GOSPEL",
+    "GRACE",
+    "HEAVEN",
+    "HELL",
+    "HOLINESS",
+    "HOLY",
+    "HOPE",
+    "JUDGMENT",
+    "JUSTICE",
+    "KINGDOM",
+    "LAW",
+    "LIGHT",
+    "LIFE",
+    "LOVE",
+    "MERCY",
+    "PROMISE",
+    "REDEMPTION",
+    "REPENTANCE",
+    "RESURRECTION",
+    "RIGHTEOUSNESS",
+    "SALVATION",
+    "SACRIFICE",
+    "SCRIPTURE",
+    "SIN",
+    "SINS",
+    "SPIRIT",
+    "SPIRITS",
+    "SPIRITUAL",
+    "TESTIMONY",
+    "TRINITY",
+    "TRUTH",
+    "WORD",
+}
+
+KNOWN_OBJECTS: Set[str] = {
+    "ALTAR",
+    "ARK",
+    "BOAT",
+    "BREAD",
+    "BRANCH",
+    "BRONZE",
+    "CANDLE",
+    "COAL",
+    "CROSS",
+    "CUP",
+    "DOOR",
+    "FIG",
+    "FISH",
+    "GOAT",
+    "LAMP",
+    "LAMB",
+    "LOAVES",
+    "MANGER",
+    "NET",
+    "OIL",
+    "PILLAR",
+    "RAM",
+    "ROD",
+    "SHEEP",
+    "SERPENT",
+    "SNAKE",
+    "SHIELD",
+    "SILVER",
+    "STAFF",
+    "STONE",
+    "STONES",
+    "SWORD",
+    "TABLE",
+    "TENT",
+    "VINE",
+    "VESSEL",
+    "WATER",
+    "WELL",
+    "WINE",
+    "WOOD",
+}
+
+KNOWN_PLACES: Set[str] = {
+    "AENON",
+    "AI",
+    "ANATHOTH",
+    "ANTIOCH",
+    "ARARAT",
+    "BABEL",
+    "BABYLON",
+    "BASHAN",
+    "BETHANY",
+    "BETHEL",
+    "BETHLEHEM",
+    "BETHSAIDA",
+    "CANA",
+    "CAPERNAUM",
+    "CARMEL",
+    "DAMASCUS",
+    "EDOM",
+    "EGYPT",
+    "EUPHRATES",
+    "GALILEE",
+    "GATH",
+    "GERAR",
+    "GILEAD",
+    "GOLAN",
+    "HEBRON",
+    "HOREB",
+    "ISRAEL",
+    "JERICHO",
+    "JERUSALEM",
+    "JOPPA",
+    "JORDAN",
+    "JUDEA",
+    "LACHISH",
+    "NAIN",
+    "NAZARETH",
+    "NILE",
+    "NINEVEH",
+    "OLIVET",
+    "PHILIPPI",
+    "SALIM",
+    "SAMARIA",
+    "SHILOH",
+    "SIDON",
+    "SION",
+    "SINAI",
+    "SODOM",
+    "SYCHAR",
+    "TARSUS",
+    "TIRZAH",
+    "TYRE",
+    "ZAREPHATH",
+    "ZION",
+}
+
+KNOWN_PEOPLE: Set[str] = (
+    set(DEFAULT_NAME_ROLES.keys())
+    | FEMALE_NAMES
+    | {"NICODEMUS", "JOHN", "JESUS", "LAZARUS", "PILATE", "HEROD", "MARY", "MARTHA"}
+)
+
+
+def configure_seed(seed: int) -> None:
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def truncate_text(text: str, limit: int = MAX_CLUE_LENGTH) -> str:
+    if len(text) <= limit:
+        return text
+    truncated = text[: limit - 3]
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    return truncated.rstrip(",;: ") + "..."
+
+
+def strip_markup(text: str) -> str:
+    if not text:
+        return ""
+    temp = text.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    temp = re.sub(r"</(p|div|section|h\d)>", "\n", temp, flags=re.IGNORECASE)
+    temp = TAG_RE.sub(" ", temp)
+    temp = html.unescape(temp)
+    temp = temp.replace("\xa0", " ")
+    temp = re.sub(r"\s+", " ", temp)
+    return temp.strip()
+
+
+def format_list(items: Sequence[str]) -> str:
+    cleaned = [item for item in items if item]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
+
+
+def third_person(lemma: str) -> str:
+    base = lemma.lower()
+    if not base:
+        return ""
+    if base in VERB_IRREGULAR_MAP:
+        return VERB_IRREGULAR_MAP[base]
+    if base.endswith("y") and len(base) > 1 and base[-2] not in "aeiou":
+        return base[:-1] + "ies"
+    if base.endswith(("sh", "ch", "x", "s", "z", "o")):
+        return base + "es"
+    return base + "s"
+
+
+def sanitize_clause(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    return cleaned
+
+
+def remove_answer_from_clue(clue: str, answer: str) -> str:
+    if not clue:
+        return clue
+    pattern = re.compile(re.escape(answer), re.IGNORECASE)
+    cleaned = pattern.sub("", clue)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(",;:. ").strip()
+
+
+def normalize_upper(text: str) -> str:
+    return NON_ALPHA_RE.sub("", text.upper()) if text else ""
+
+
+def format_subtree_tokens(tokens: Iterable[Any], exclude_word: Optional[str] = None) -> str:
+    exclude_norm = normalize_upper(exclude_word) if exclude_word else None
+    parts: List[str] = []
+    for tok in sorted(tokens, key=lambda t: t.i):
+        if exclude_norm and normalize_upper(tok.text) == exclude_norm:
+            continue
+        parts.append(tok.text)
+    text = " ".join(parts)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ,.;:-")
+
+
+def get_subject_phrase(verb: Any, exclude_word: Optional[str] = None) -> Optional[str]:
+    if verb is None:
+        return None
+    for child in verb.children:
+        if child.dep_ in {"nsubj", "nsubjpass"}:
+            phrase = format_subtree_tokens(child.subtree, exclude_word)
+            if phrase:
+                return phrase
+    return None
+
+
+def build_verb_phrase(verb: Any, exclude_word: Optional[str] = None) -> str:
+    if verb is None:
+        return ""
+    base = third_person(verb.lemma_ if verb.lemma_ != "-PRON-" else verb.text)
+    fragments: List[str] = []
+    for child in sorted(verb.children, key=lambda t: t.i):
+        dep = child.dep_
+        if dep in {"dobj", "obj", "attr", "oprd", "pobj", "advmod", "acomp", "xcomp", "obl", "prt"}:
+            fragment = format_subtree_tokens(child.subtree, exclude_word)
+            if fragment:
+                fragments.append(fragment)
+        elif dep == "prep":
+            prep_text = child.text.lower()
+            pobj_fragments: List[str] = []
+            for pobj in child.children:
+                if pobj.dep_ == "pobj":
+                    frag = format_subtree_tokens(pobj.subtree, exclude_word)
+                    if frag:
+                        pobj_fragments.append(frag)
+            if pobj_fragments:
+                fragments.append(f"{prep_text} {' '.join(pobj_fragments)}")
+    phrase = base
+    if fragments:
+        phrase = f"{base} {' '.join(fragments[:2])}"
+    return sanitize_clause(phrase)
+
+
+def extract_local_context(sent: Any, answer: str, window: int = 8) -> str:
+    if sent is None:
+        return ""
+    tokens = list(sent)
+    answer_norm = normalize_upper(answer)
+    indices = [i for i, tok in enumerate(tokens) if normalize_upper(tok.text) == answer_norm]
+    if indices:
+        idx = indices[0]
+        start = max(0, idx - window)
+        end = min(len(tokens), idx + window + 1)
+        snippet_tokens = [
+            tok.text
+            for i, tok in enumerate(tokens[start:end])
+            if normalize_upper(tok.text) != answer_norm
+        ]
+    else:
+        snippet_tokens = [tok.text for tok in tokens]
+    snippet = " ".join(snippet_tokens)
+    snippet = re.sub(r"\s+", " ", snippet)
+    snippet = re.sub(r"\d+:\d+", "", snippet)
+    snippet = snippet.strip(" ,.;:-")
+    return snippet
+
+
+def summarize_context(token: Any, answer: str, category: str) -> str:
+    if token is None:
+        return ""
+    snippet = extract_local_context(token.sent, answer)
+    snippet = remove_answer_from_clue(snippet, answer)
+    if not snippet:
+        return ""
+    snippet = snippet.lstrip(" ,;:")
+    lower = snippet.lower()
+    if category == CATEGORY_PLACE:
+        return f"events such as {lower}"
+    if category == CATEGORY_OBJECT:
+        return f"mentioned when {lower}"
+    if category == CATEGORY_THEOLOGY:
+        return f"described as {lower}"
+    return snippet
+
+
+def finalize_clue(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip(" ;,")
+    if not cleaned:
+        return ""
+    if cleaned[-1] not in ".?!":
+        cleaned = f"{cleaned}."
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return truncate_text(cleaned)
+
+
+def ensure_unique_structure(
+    clue: str,
+    token: Optional[Any],
+    candidate: Candidate,
+    existing_signatures: Set[str],
+) -> str:
+    signature = " ".join(clue.lower().split()[:4])
+    if signature not in existing_signatures:
+        existing_signatures.add(signature)
+        return clue
+    extra = ""
+    if candidate.context_phrases:
+        for phrase in candidate.context_phrases:
+            if phrase and phrase.lower() not in clue.lower():
+                extra = phrase
+                break
+    if not extra and token is not None:
+        extra = extract_local_context(token.sent, candidate.word, window=5)
+        extra = remove_answer_from_clue(extra, candidate.word)
+    if extra:
+        extra = re.sub(r"\s+", " ", extra).strip(" ,.;:")
+        if extra:
+            adjusted = f"{clue.rstrip('.')} - {extra}"
+        else:
+            adjusted = clue
+    else:
+        adjusted = f"{clue.rstrip('.')} - distinct focus"
+    adjusted = finalize_clue(adjusted)
+    signature = " ".join(adjusted.lower().split()[:4])
+    existing_signatures.add(signature)
+    return adjusted
+
+
+class TextProcessor:
+    def __init__(self, seed: int) -> None:
+        self.seed = seed
+        self.nlp = self._load_model()
+        self.stopwords = self._build_stopwords()
+        self.stemmer = SnowballStemmer("english")
+
+    def _load_model(self) -> Any:
+        try:
+            return spacy.load("en_core_web_sm")
+        except OSError:
+            spacy.cli.download("en_core_web_sm")
+            return spacy.load("en_core_web_sm")
+
+    def _build_stopwords(self) -> Set[str]:
+        base = {self.normalize_token(word) for word in stopwords.words("english")}
+        return base
+
+    def normalize_token(self, text: str) -> str:
+        if not text:
+            return ""
+        return NON_ALPHA_RE.sub("", text.upper())
+
+    def stem(self, text: str) -> str:
+        if not text:
+            return ""
+        return self.normalize_token(self.stemmer.stem(text.lower()))
+
+    def doc_from_text(self, text: str) -> Any:
+        cleaned = text.replace("\r", " ").replace("\n", " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned:
+            cleaned = " "
+        return self.nlp(cleaned)
+
+    def summarize(self, doc: Any, rng: random.Random) -> str:
+        noun_counter: Counter = Counter()
+        verb_counter: Counter = Counter()
+        adj_counter: Counter = Counter()
+        surface_map: Dict[str, str] = {}
+        for token in doc:
+            if not token.is_alpha:
+                continue
+            norm = self.normalize_token(token.lemma_ if token.lemma_ != "-PRON-" else token.text)
+            if not norm or norm in self.stopwords:
+                continue
+            surface_map.setdefault(norm, token.text)
+            if token.pos_ in {"NOUN", "PROPN"}:
+                noun_counter[norm] += 1
+            elif token.pos_ == "VERB":
+                verb_counter[norm] += 1
+            elif token.pos_ == "ADJ":
+                adj_counter[norm] += 1
+        noun_terms = [surface_map[n] for n, _ in noun_counter.most_common(3)]
+        verb_terms = [surface_map[v] for v, _ in verb_counter.most_common(2)]
+        adj_terms = [surface_map[a] for a, _ in adj_counter.most_common(2)]
+        sentences: List[str] = []
+        if noun_terms:
+            noun_phrase = format_list(noun_terms)
+            sentences.append(f"Highlights {noun_phrase}.")
+        if verb_terms:
+            verb_phrase = format_list([third_person(term) for term in verb_terms])
+            sentences.append(f"Key actions include {verb_phrase}.")
+        if not sentences and adj_terms:
+            adj_phrase = format_list([term.lower() for term in adj_terms])
+            sentences.append(f"Emphasizes {adj_phrase} themes.")
+        if not sentences:
+            sentences.append("Focuses on the chapter narrative.")
+        return " ".join(sentences[:2])
+
+    def zipf(self, word: str) -> float:
+        return zipf_frequency(word.lower(), "en")
+
+
+def gather_synset_lemmas(processor: TextProcessor, lemma: str, pos: str) -> Set[str]:
+    wn_pos = WORDNET_POS_MAP.get(pos)
+    results: Set[str] = set()
+    if not wn_pos:
+        return results
+    try:
+        for syn in wordnet.synsets(lemma.lower(), pos=wn_pos):
+            for name in syn.lemma_names():
+                norm = processor.normalize_token(name)
+                if norm:
+                    results.add(norm)
+    except LookupError:
+        pass
+    return results
+
+
+def classify_candidate(token: Any, word: str, lemma: str) -> str:
+    upper_word = normalize_upper(word)
+    upper_lemma = normalize_upper(lemma)
+    ent_type = token.ent_type_ if token is not None else ""
+    if ent_type == "PERSON" or upper_word in KNOWN_PEOPLE or upper_lemma in KNOWN_PEOPLE:
+        return CATEGORY_PERSON
+    if ent_type in {"GPE", "LOC", "FAC"} or upper_word in KNOWN_PLACES:
+        return CATEGORY_PLACE
+    if upper_word in KNOWN_OBJECTS or upper_lemma in KNOWN_OBJECTS:
+        return CATEGORY_OBJECT
+    if upper_word in THEOLOGICAL_TERMS or upper_lemma in THEOLOGICAL_TERMS:
+        return CATEGORY_THEOLOGY
+    if token is None:
+        return CATEGORY_OTHER
+    if token.pos_ == "PROPN":
+        if upper_word in KNOWN_PLACES:
+            return CATEGORY_PLACE
+        return CATEGORY_PERSON
+    if token.pos_ == "NOUN":
+        if upper_word in THEOLOGICAL_TERMS or upper_lemma in THEOLOGICAL_TERMS:
+            return CATEGORY_THEOLOGY
+        return CATEGORY_OBJECT
+    if token.pos_ == "ADJ" and (upper_word in THEOLOGICAL_TERMS or upper_lemma in THEOLOGICAL_TERMS):
+        return CATEGORY_THEOLOGY
+    return CATEGORY_OTHER
+
+
+def compute_candidate_score(
+    processor: TextProcessor,
+    norm: str,
+    lemma: str,
+    pos: str,
+    frequency: int,
+    lemma_presence: Dict[str, Set[int]],
+    is_proper: bool,
+    category: str,
+) -> float:
+    base = CATEGORY_BASE_WEIGHTS.get(category, 1.0)
+    pos_weight = POS_WEIGHTS.get(pos, 1.0)
+    tf_bonus = min(1.8, math.log1p(frequency))
+    uniqueness = 1.0 if len(lemma_presence.get(lemma, {0})) == 1 else 0.0
+    length_bonus = 0.6 * min(len(norm), 12) / 12
+    zipf_val = processor.zipf(norm) if norm else 0.0
+    if zipf_val <= 0:
+        rarity_bonus = 0.5
+    else:
+        rarity_bonus = max(0.0, (5.2 - zipf_val) * 0.35)
+    proper_bonus = 0.3 if is_proper else 0.0
+    return base + pos_weight + tf_bonus + uniqueness + length_bonus + rarity_bonus + proper_bonus
+
+
+def build_candidates(
+    payload: ChapterPayload,
+    processor: TextProcessor,
+    lemma_presence: Dict[str, Set[int]],
+) -> List[Candidate]:
+    candidates: Dict[str, Candidate] = {}
+    doc = payload.doc
+    if doc is None:
+        return []
+    for token in doc:
+        if not token.is_alpha:
+            continue
+        norm = processor.normalize_token(token.text)
+        if not norm:
+            continue
+        if norm in BANNED_WORDS:
+            continue
+        if len(norm) < 3 or len(norm) > 15:
+            continue
+        lemma_norm = processor.normalize_token(token.lemma_ if token.lemma_ != "-PRON-" else token.text)
+        if not lemma_norm:
+            lemma_norm = norm
+        if lemma_norm in BANNED_WORDS:
+            continue
+        category = classify_candidate(token, norm, lemma_norm)
+        if category == CATEGORY_OTHER and norm in processor.stopwords:
+            continue
+        pos = token.pos_
+        if pos not in {"NOUN", "PROPN", "VERB", "ADJ"}:
+            continue
+        is_proper = pos == "PROPN"
+        if (norm in processor.stopwords or lemma_norm in processor.stopwords) and not is_proper:
+            continue
+        frequency = payload.token_counts.get(norm, 1)
+        score = compute_candidate_score(processor, norm, lemma_norm, pos, frequency, lemma_presence, is_proper, category)
+        synset_lemmas = gather_synset_lemmas(processor, token.lemma_ if token.lemma_ != "-PRON-" else token.text, pos)
+        context_phrases = extract_verb_phrases(token, norm)
+        candidate = Candidate(
+            word=norm,
+            lemma=lemma_norm,
+            stem=processor.stem(norm),
+            pos=pos,
+            score=score,
+            frequency=frequency,
+            is_proper=is_proper,
+            sentence=token.sent.text.strip(),
+            token_index=token.i,
+            category=category,
+            synset_lemmas=synset_lemmas,
+            context_phrases=context_phrases,
+        )
+        existing = candidates.get(norm)
+        if existing is None or candidate.score > existing.score:
+            candidates[norm] = candidate
+    return list(candidates.values())
+
+def select_candidates(candidates: List[Candidate]) -> List[Candidate]:
+    if not candidates:
+        return []
+    ordered = sorted(candidates, key=lambda c: (-c.score, c.word))
+    unique: List[Candidate] = []
+    seen_words: Set[str] = set()
+    seen_stems: Set[str] = set()
+    seen_syns: Set[str] = set()
+    for cand in ordered:
+        if cand.word in seen_words:
+            continue
+        if cand.stem and cand.stem in seen_stems:
+            continue
+        duplicate = False
+        for other in unique:
+            if fuzz.ratio(cand.word, other.word) >= 85:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        if cand.synset_lemmas and (cand.synset_lemmas & seen_syns):
+            continue
+        unique.append(cand)
+        seen_words.add(cand.word)
+        if cand.stem:
+            seen_stems.add(cand.stem)
+        if cand.synset_lemmas:
+            seen_syns.update(cand.synset_lemmas)
+    category_map: Dict[str, List[Candidate]] = defaultdict(list)
+    for cand in unique:
+        category_map[cand.category].append(cand)
+    for cat_list in category_map.values():
+        cat_list.sort(key=lambda c: (-c.score, c.word))
+    final: List[Candidate] = []
+    used_words: Set[str] = set()
+
+    def take_candidate(c: Candidate) -> None:
+        final.append(c)
+        used_words.add(c.word)
+
+    for category, required in CATEGORY_REQUIREMENTS:
+        cat_list = category_map.get(category, [])
+        count = 0
+        while cat_list and count < required and len(final) < MAX_WORD_COUNT:
+            cand = cat_list.pop(0)
+            if cand.word in used_words:
+                continue
+            take_candidate(cand)
+            count += 1
+
+    target = min(MAX_WORD_COUNT, max(MIN_WORD_COUNT, min(TARGET_WORD_COUNT, len(unique))))
+    while len(final) < target:
+        added = False
+        for category in CATEGORY_PRIORITY_ORDER:
+            cat_list = category_map.get(category, [])
+            while cat_list:
+                cand = cat_list.pop(0)
+                if cand.word in used_words:
+                    continue
+                take_candidate(cand)
+                added = True
+                break
+            if added and len(final) >= target:
+                break
+        if not added:
+            break
+
+    if len(final) < MIN_WORD_COUNT:
+        for cat_list in category_map.values():
+            while cat_list and len(final) < min(MAX_WORD_COUNT, len(unique)):
+                cand = cat_list.pop(0)
+                if cand.word in used_words:
+                    continue
+                take_candidate(cand)
+
+    return final[:MAX_WORD_COUNT]
+
+def infer_role(name: str, context_words: Set[str], chapter_words: Set[str]) -> str:
+    upper_name = name.upper()
+    rules = SPECIAL_NAME_RULES.get(upper_name)
+    if rules:
+        for keywords, label in rules:
+            if keywords & context_words or keywords & chapter_words:
+                return label
+    if upper_name in DEFAULT_NAME_ROLES:
+        return DEFAULT_NAME_ROLES[upper_name]
+    if upper_name in FEMALE_NAMES:
+        return "woman"
+    if upper_name in {"ISRAEL", "JUDAH", "EGYPT", "ROME"}:
+        return "nation"
+    return "man" if upper_name not in FEMALE_NAMES else "woman"
+
+
+def extract_hint_phrases(context_words: Set[str]) -> List[str]:
+    hints: List[str] = []
+    for word, phrase in HINT_WORDS.items():
+        if word in context_words:
+            hints.append(phrase)
+    return hints[:2]
+
+
+def extract_verb_phrases(token: Any, answer: str) -> List[str]:
+    if token is None:
+        return []
+    phrases: List[str] = []
+    answer_norm = normalize_upper(answer)
+    for cand in token.sent:
+        if cand.pos_ != "VERB":
+            continue
+        if not any(normalize_upper(node.text) == answer_norm for node in cand.subtree):
+            continue
+        base = third_person(cand.lemma_ if cand.lemma_ != "-PRON-" else cand.text)
+        if not base:
+            continue
+        fragments: List[str] = []
+        for child in sorted(cand.children, key=lambda t: t.i):
+            if child.dep_ in {"dobj", "pobj", "prep", "advmod", "prt", "attr", "acomp", "obl", "oprd"}:
+                words = [t.text for t in sorted(child.subtree, key=lambda t: t.i)]
+                fragment = " ".join(words)
+                if answer.lower() in fragment.lower():
+                    continue
+                fragments.append(fragment)
+        clause = base
+        if fragments:
+            clause = f"{base} {' '.join(fragments[:2])}"
+        clause = sanitize_clause(clause)
+        clause = remove_answer_from_clue(clause, answer)
+        if not clause:
+            continue
+        if clause not in phrases:
+            phrases.append(clause)
+        if len(phrases) == 3:
+            break
+    return phrases
+
+def generate_person_clue(
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+    context_words: Set[str] = set()
+    if token is not None:
+        for word in token.sent:
+            norm = processor.normalize_token(word.text)
+            if norm:
+                context_words.add(norm)
+    role = infer_role(candidate.word, context_words, payload.vocab)
+    role_phrase = role.capitalize() if role else "Figure"
+    verb_phrases = candidate.context_phrases or (extract_verb_phrases(token, candidate.word) if token else [])
+    hints = extract_hint_phrases(context_words)
+    clue_body = ""
+    if verb_phrases:
+        clue_body = verb_phrases[0]
+        if hints and hints[0] not in clue_body:
+            clue_body = f"{clue_body}, {hints[0]}"
+    else:
+        summary = summarize_context(token, candidate.word, CATEGORY_PERSON)
+        if summary:
+            clue_body = summary
+    if not clue_body:
+        clue_body = "plays a key role in this chapter"
+    clue = f"{role_phrase} who {clue_body}"
+    clue = remove_answer_from_clue(clue, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+def build_place_description(token: Any, answer: str) -> str:
+    if token is None:
+        return ""
+    governing = None
+    preposition = None
+    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        governing = preposition.head
+    elif token.dep_ in {"nsubj", "nsubjpass"}:
+        governing = token.head
+    else:
+        for ancestor in token.ancestors:
+            if ancestor.pos_ == "VERB":
+                governing = ancestor
+                break
+    if governing is None:
+        return ""
+    subject = get_subject_phrase(governing, answer)
+    verb_phrase = build_verb_phrase(governing, answer)
+    if not verb_phrase:
+        verb_phrase = third_person(
+            governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text
+        )
+    prep_text = preposition.text.lower() if preposition is not None else "at"
+    if subject:
+        return f"{subject} {verb_phrase} {prep_text} this place"
+    return f"{verb_phrase.capitalize()} {prep_text} this place"
+
+
+def generate_place_clue(
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+    description = build_place_description(token, candidate.word)
+    if not description:
+        summary = summarize_context(token, candidate.word, CATEGORY_PLACE)
+        if summary:
+            description = summary
+    if not description:
+        description = "is a location highlighted in this chapter"
+    clue = f"Where {description}"
+    clue = remove_answer_from_clue(clue, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+
+def build_object_description(token: Any, answer: str) -> str:
+    if token is None:
+        return ""
+    verb = None
+    preposition = None
+    if token.dep_ in {"dobj", "obj"}:
+        verb = token.head
+    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        verb = preposition.head
+    elif token.dep_ == "attr":
+        verb = token.head
+    else:
+        for ancestor in token.ancestors:
+            if ancestor.pos_ == "VERB":
+                verb = ancestor
+                break
+    if verb is None:
+        return ""
+    subject = get_subject_phrase(verb, answer)
+    verb_phrase = build_verb_phrase(verb, answer)
+    if preposition is not None and subject:
+        return f"{subject} {verb_phrase} {preposition.text.lower()} this"
+    if subject and verb_phrase:
+        return f"{subject} {verb_phrase} this"
+    if verb_phrase:
+        return f"{verb_phrase.capitalize()} this"
+    return ""
+
+
+def generate_object_clue(
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+    description = build_object_description(token, candidate.word)
+    if not description:
+        summary = summarize_context(token, candidate.word, CATEGORY_OBJECT)
+        if summary:
+            description = summary
+    if not description:
+        description = "object highlighted in this passage"
+    clue = remove_answer_from_clue(description, candidate.word)
+    if clue and not clue.lower().startswith(("this", "these", "it", "symbol", "item")):
+        clue = f"This {clue}" if not clue.lower().startswith("this ") else clue
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+
+def build_theology_description(token: Any, answer: str) -> str:
+    if token is None:
+        return ""
+    verb = None
+    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
+        head = token.head
+        if head is not None and head.pos_ == "VERB":
+            verb = head
+    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
+        verb = token
+    if verb is not None:
+        subject = get_subject_phrase(verb, answer)
+        verb_phrase = build_verb_phrase(verb, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+        if verb_phrase:
+            return f"{verb_phrase.capitalize()}"
+    if token.dep_ == "attr" and token.head.pos_ == "VERB":
+        subject = get_subject_phrase(token.head, answer)
+        verb_phrase = build_verb_phrase(token.head, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+    for child in token.children:
+        if child.dep_ == "relcl":
+            fragment = format_subtree_tokens(child.subtree, answer)
+            if fragment:
+                return fragment
+    return ""
+
+
+def generate_theology_clue(
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+    description = build_theology_description(token, candidate.word)
+    if not description:
+        summary = summarize_context(token, candidate.word, CATEGORY_THEOLOGY)
+        if summary:
+            description = summary
+    if not description:
+        description = "key theme in this chapter"
+    clue = f"Concept {description}"
+    clue = remove_answer_from_clue(clue, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+
+def generate_generic_clue(
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+    summary = summarize_context(token, candidate.word, CATEGORY_OTHER)
+    if not summary:
+        summary = "mentioned in this chapter"
+    clue = remove_answer_from_clue(summary, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+
+def generate_clue(
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    if candidate.category == CATEGORY_PERSON:
+        return generate_person_clue(candidate, processor, payload, existing_signatures)
+    if candidate.category == CATEGORY_PLACE:
+        return generate_place_clue(candidate, processor, payload, existing_signatures)
+    if candidate.category == CATEGORY_OBJECT:
+        return generate_object_clue(candidate, processor, payload, existing_signatures)
+    if candidate.category == CATEGORY_THEOLOGY:
+        return generate_theology_clue(candidate, processor, payload, existing_signatures)
+    return generate_generic_clue(candidate, processor, payload, existing_signatures)
+
+def parse_books(book_str: Optional[str]) -> List[BookMetadata]:
+    if not book_str:
+        return BOOKS
+    ids = [part.strip().upper() for part in book_str.split(",") if part.strip()]
+    unknown = [book_id for book_id in ids if book_id not in BOOK_BY_ID]
+    if unknown:
+        raise SystemExit(f"Unknown book id(s): {', '.join(unknown)}")
+    return [BOOK_BY_ID[book_id] for book_id in ids]
+
+
+def build_book_lemma_presence(chapters: List[ChapterPayload]) -> Dict[str, Set[int]]:
+    presence: Dict[str, Set[int]] = defaultdict(set)
+    for payload in chapters:
+        for lemma in payload.lemma_set:
+            presence[lemma].add(payload.chapter)
+    return presence
+
+
+def process_book(
+    book: BookMetadata,
+    payloads: List[ChapterPayload],
+    processor: TextProcessor,
+    base_seed: int,
+) -> List[ChapterResult]:
+    book_results: List[ChapterResult] = []
+    lemma_presence = build_book_lemma_presence(payloads)
+    for payload in payloads:
+        chapter_seed = (base_seed * 977) + (BOOK_INDEX[book.id] * 37) + payload.chapter
+        rng = random.Random(chapter_seed)
+        summary = processor.summarize(payload.doc, rng)
+        candidates = build_candidates(payload, processor, lemma_presence)
+        selected = select_candidates(candidates)
+        if len(selected) < MIN_WORD_COUNT:
+            extras = [cand for cand in candidates if cand not in selected]
+            extras.sort(key=lambda c: (-c.score, c.word))
+            for cand in extras:
+                if cand.word not in {s.word for s in selected}:
+                    selected.append(cand)
+                if len(selected) >= MIN_WORD_COUNT:
+                    break
+        words_with_clues: List[Tuple[str, str]] = []
+        existing_signatures: Set[str] = set()
+        for cand in selected:
+            clue = generate_clue(cand, processor, payload, existing_signatures)
+            words_with_clues.append((cand.word, clue))
+        book_results.append(
+            ChapterResult(
+                book_id=book.id,
+                book_name=book.name,
+                chapter=payload.chapter,
+                summary=summary,
+                words=words_with_clues,
+            )
+        )
+    return book_results
+
+class WldehCdnClient:
+    def __init__(self, base_url: str, version: str, cache_dir: Path) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.version = version.strip("/")
+        self.cache_root = cache_dir / "wldeh" / self.version
+        self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.session = requests.Session()
+
+    @property
+    def header_id(self) -> str:
+        return f"wldeh:{self.version}"
+
+    @property
+    def source_label(self) -> str:
+        return f"wldeh {self.version}"
+
+    def fetch_book(self, book: BookMetadata, max_workers: int) -> List[ChapterPayload]:
+        chapters = list(range(1, book.chapters + 1))
+        payloads: List[ChapterPayload] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(self._load_chapter, book, chapter): chapter for chapter in chapters
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                payloads.append(future.result())
+        payloads.sort(key=lambda item: item.chapter)
+        return payloads
+
+    def _cache_path(self, book: BookMetadata, chapter: int) -> Path:
+        return self.cache_root / book.id / f"{book.id}.{chapter}.json"
+
+    def _load_chapter(self, book: BookMetadata, chapter: int) -> ChapterPayload:
+        cache_path = self._cache_path(book, chapter)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        timing = ChapterTiming(book.id, chapter)
+        if cache_path.exists():
+            start = time.perf_counter()
+            with cache_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            timing.fetch_seconds = time.perf_counter() - start
+        else:
+            start = time.perf_counter()
+            payload = self._fetch_remote_chapter(book, chapter)
+            with cache_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            timing.fetch_seconds = time.perf_counter() - start
+        content = payload.get("data", {}).get("content", "")
+        text = strip_markup(content)
+        chapter_payload = ChapterPayload(
+            book_id=book.id,
+            book_name=book.name,
+            chapter=chapter,
+            chapter_id=f"{book.id}.{chapter}",
+            text=text,
+            timing=timing,
+        )
+        return chapter_payload
+
+    def _fetch_remote_chapter(self, book: BookMetadata, chapter: int) -> Dict[str, Any]:
+        url = f"{self.base_url}/{self.version}/books/{book.slug}/chapters/{chapter}.json"
+        response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+        if response.status_code == 404:
+            raise RuntimeError(f"Chapter not found: {book.id} {chapter}")
+        if response.status_code >= 400:
+            raise RuntimeError(f"HTTP error {response.status_code} for {url}")
+        try:
+            raw = response.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON for {url}") from exc
+        content = self._coalesce_text(raw)
+        if not content:
+            content = self._fetch_per_verse(book, chapter)
+        return {"data": {"content": content}}
+
+    def _coalesce_text(self, data: Any) -> str:
+        if isinstance(data, dict):
+            if isinstance(data.get("text"), str):
+                return strip_markup(data["text"])
+            if isinstance(data.get("text"), list):
+                return strip_markup(" ".join(str(part) for part in data["text"]))
+            if isinstance(data.get("verses"), list):
+                parts: List[str] = []
+                for verse in data["verses"]:
+                    if isinstance(verse, dict):
+                        part = verse.get("text") or verse.get("content") or ""
+                    else:
+                        part = str(verse)
+                    if part:
+                        parts.append(part)
+                return strip_markup(" ".join(parts))
+            if isinstance(data.get("content"), str):
+                return strip_markup(data["content"])
+        if isinstance(data, list):
+            return strip_markup(" ".join(str(item) for item in data))
+        if isinstance(data, str):
+            return strip_markup(data)
+        return ""
+
+    def _fetch_per_verse(self, book: BookMetadata, chapter: int) -> str:
+        verses: List[str] = []
+        verse = 1
+        while verse <= 200:
+            url = f"{self.base_url}/{self.version}/books/{book.slug}/chapters/{chapter}/verses/{verse}.json"
+            response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 404:
+                break
+            if response.status_code >= 400:
+                raise RuntimeError(f"HTTP error {response.status_code} for {url}")
+            try:
+                raw = response.json()
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid verse JSON for {url}") from exc
+            part = self._coalesce_text(raw)
+            if part:
+                verses.append(part)
+            verse += 1
+        return " ".join(verses)
+
+class ApiBibleClient:
+    def __init__(self, bible_id: str, api_key: str, cache_dir: Path) -> None:
+        self.base_url = "https://api.scripture.api.bible/v1"
+        self.bible_id = bible_id
+        self.api_key = api_key
+        self.cache_root = cache_dir / bible_id
+        self.cache_root.mkdir(parents=True, exist_ok=True)
+        self.session = requests.Session()
+
+    @property
+    def header_id(self) -> str:
+        return self.bible_id
+
+    @property
+    def source_label(self) -> str:
+        return f"API.Bible {self.bible_id}"
+
+    def fetch_book(self, book: BookMetadata, max_workers: int) -> List[ChapterPayload]:
+        chapter_ids = self._list_chapter_ids(book.id)
+        payloads: List[ChapterPayload] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_map = {
+                executor.submit(self._load_chapter, book, chapter_id, idx + 1): chapter_id
+                for idx, chapter_id in enumerate(chapter_ids)
+            }
+            for future in concurrent.futures.as_completed(future_map):
+                payloads.append(future.result())
+        payloads.sort(key=lambda payload: payload.chapter)
+        return payloads
+
+    def _cache_path(self, book: BookMetadata, chapter_id: str) -> Path:
+        safe_id = chapter_id.replace("/", "_").replace(":", "_")
+        return self.cache_root / book.id / f"{safe_id}.json"
+
+    def _load_chapter(self, book: BookMetadata, chapter_id: str, chapter_number: int) -> ChapterPayload:
+        cache_path = self._cache_path(book, chapter_id)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        timing = ChapterTiming(book.id, chapter_number)
+        if cache_path.exists():
+            start = time.perf_counter()
+            with cache_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            timing.fetch_seconds = time.perf_counter() - start
+        else:
+            start = time.perf_counter()
+            payload = self._fetch_remote_chapter(chapter_id)
+            with cache_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            timing.fetch_seconds = time.perf_counter() - start
+        content = payload.get("data", {}).get("content", "")
+        text = strip_markup(content)
+        chapter_payload = ChapterPayload(
+            book_id=book.id,
+            book_name=book.name,
+            chapter=chapter_number,
+            chapter_id=chapter_id,
+            text=text,
+            timing=timing,
+        )
+        return chapter_payload
+
+    def _fetch_remote_chapter(self, chapter_id: str) -> Dict[str, Any]:
+        url = (
+            f"{self.base_url}/bibles/{self.bible_id}/chapters/{chapter_id}?content-type=text"
+            "&include-notes=false&include-titles=false&include-verse-numbers=false"
+        )
+        response = self._request(url)
+        try:
+            raw = response.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid JSON for {url}") from exc
+        content = raw.get("data", {}).get("content", "")
+        if not content:
+            content = self._coalesce_text(raw)
+        return {"data": {"content": content}}
+
+    def _coalesce_text(self, data: Any) -> str:
+        if isinstance(data, dict):
+            if isinstance(data.get("data"), dict):
+                inner = data["data"]
+                if isinstance(inner.get("content"), str):
+                    return strip_markup(inner["content"])
+            if isinstance(data.get("content"), str):
+                return strip_markup(data["content"])
+        return ""
+
+    def _list_chapter_ids(self, book_id: str) -> List[str]:
+        url = f"{self.base_url}/bibles/{self.bible_id}/chapters?bookId={book_id}"
+        response = self._request(url)
+        try:
+            raw = response.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid chapter list for {book_id}") from exc
+        chapters = raw.get("data", [])
+        chapter_ids = [chapter["id"] for chapter in chapters if "id" in chapter]
+        if not chapter_ids:
+            raise RuntimeError(f"No chapters found for {book_id}")
+        return chapter_ids
+
+    def _request(self, url: str) -> requests.Response:
+        headers = {"api-key": self.api_key}
+        delays = [0, 1, 2, 4, 8]
+        for delay in delays:
+            response = self.session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 429:
+                time.sleep(delay or 1)
+                continue
+            if response.status_code >= 400:
+                raise RuntimeError(f"HTTP error {response.status_code} for {url}")
+            return response
+        raise RuntimeError(f"Rate limit exceeded for {url}")
+
+def enrich_payloads(payloads: List[ChapterPayload], processor: TextProcessor) -> None:
+    for payload in payloads:
+        start = time.perf_counter()
+        doc = processor.doc_from_text(payload.text)
+        payload.doc = doc
+        payload.sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
+        counts: Counter = Counter()
+        lemma_set: Set[str] = set()
+        vocab: Set[str] = set()
+        for token in doc:
+            if not token.is_alpha:
+                continue
+            norm = processor.normalize_token(token.text)
+            if not norm:
+                continue
+            counts[norm] += 1
+            vocab.add(norm)
+            lemma_norm = processor.normalize_token(token.lemma_ if token.lemma_ != "-PRON-" else token.text)
+            if lemma_norm:
+                lemma_set.add(lemma_norm)
+        payload.token_counts = counts
+        payload.lemma_set = lemma_set
+        payload.vocab = vocab
+        payload.timing.process_seconds = time.perf_counter() - start
+
+
+def write_book_output(
+    book: BookMetadata,
+    results: List[ChapterResult],
+    out_dir: Path,
+    header_id: str,
+    source_label: str,
+    seed: int,
+    timestamp: str,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    file_path = out_dir / f"{book.name}.txt"
+    lines: List[str] = []
+    lines.append(f"BIBLE_ID: {header_id}  DATE: {timestamp}  SEED: {seed}")
+    lines.append(f"Source: {source_label}")
+    for result in results:
+        lines.append(f"Book: {result.book_name}  Chapter: {result.chapter}  Seed: {seed}")
+        lines.append(f"Theme: {result.summary}")
+        lines.append(f"Words ({len(result.words)}):")
+        for word, clue in result.words:
+            lines.append(f"{word}: {clue}")
+        lines.append("---")
+        lines.append("")
+    if lines[-1] == "":
+        lines.pop()
+    if lines[-1] == "---":
+        lines.pop()
+    content = "\n".join(lines) + "\n"
+    file_path.write_text(content, encoding="utf-8")
+
+
+def parse_arguments(argv: Optional[Sequence[str]]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate crossword-friendly clues for Bible chapters.")
+    parser.add_argument("--seed", type=int, default=1337, help="Random seed for deterministic runs")
+    parser.add_argument("--books", type=str, default=None, help="Comma-separated book IDs (e.g., MAT,MRK,LUK,JHN)")
+    parser.add_argument("--out", type=Path, default=Path("out"), help="Output directory")
+    parser.add_argument("--cache", type=Path, default=Path(".cache"), help="Cache directory for chapter JSON files")
+    parser.add_argument("--max-workers", type=int, default=None, help="Max worker threads for fetching")
+    parser.add_argument("--provider", choices=["wldeh", "apibible"], default="wldeh", help="Data provider to use")
+    parser.add_argument("--wldeh-version", type=str, default="en-web", help="Version identifier for wldeh provider")
+    parser.add_argument(
+        "--wldeh-base",
+        type=str,
+        default="https://cdn.jsdelivr.net/gh/wldeh/bible-api/bibles",
+        help="Base URL for wldeh CDN or mirror",
+    )
+    parser.add_argument(
+        "--bible-id",
+        type=str,
+        default="de4e12af7f28f599-02",
+        help="API.Bible identifier (used when provider=apibible)",
+    )
+    return parser.parse_args(argv)
+
+
+def run(argv: Optional[Sequence[str]] = None) -> int:
+    args = parse_arguments(argv)
+    configure_seed(args.seed)
+    out_dir = args.out.resolve()
+    cache_dir = args.cache.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    max_workers = args.max_workers or (os.cpu_count() or 4)
+    if max_workers < 1:
+        max_workers = 1
+    books = parse_books(args.books)
+    if args.provider == "wldeh":
+        client: Any = WldehCdnClient(args.wldeh_base, args.wldeh_version, cache_dir)
+    else:
+        api_key = os.getenv("API_BIBLE_KEY")
+        if not api_key:
+            raise SystemExit("Missing API_BIBLE_KEY environment variable required for apibible provider.")
+        client = ApiBibleClient(args.bible_id, api_key, cache_dir)
+    processor = TextProcessor(args.seed)
+    timestamp = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
+    for book in books:
+        payloads = client.fetch_book(book, max_workers)
+        enrich_payloads(payloads, processor)
+        results = process_book(book, payloads, processor, args.seed)
+        write_book_output(book, results, out_dir, client.header_id, client.source_label, args.seed, timestamp)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())
