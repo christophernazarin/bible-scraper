@@ -1,0 +1,115 @@
+--- bible-scraper.py
++++ bible-scraper.py
+@@
+ CATEGORY_PERSON = "PERSON"
+ CATEGORY_PLACE = "PLACE"
+ CATEGORY_OBJECT = "OBJECT"
+ CATEGORY_THEOLOGY = "THEOLOGY"
++
++# New: collective groups (Levites, Pharisees, Cretans, etc.)
++CATEGORY_GROUP = "GROUP"
++
++CATEGORY_BASE_WEIGHTS[CATEGORY_GROUP] = 3.4
++if CATEGORY_GROUP not in CATEGORY_PRIORITY_ORDER:
++    CATEGORY_PRIORITY_ORDER.insert(1, CATEGORY_GROUP)
++if (CATEGORY_GROUP, 2) not in CATEGORY_REQUIREMENTS:
++    CATEGORY_REQUIREMENTS.append((CATEGORY_GROUP, 2))
+@@
+ def classify_candidate(token: Any, word: str, lemma: str) -> str:
+     upper_word = normalize_upper(word)
+     upper_lemma = normalize_upper(lemma)
++
++    # Detect collective groups
++    if token is not None and token.pos_ == "NOUN":
++        if upper_word.endswith(("ITES", "ANS", "EANS", "IANS")):
++            return CATEGORY_GROUP
++    if upper_word in {"PHARISEES","SADDUCEES","SCRIBES","LEVITES","CRETANS","ROMANS"}:
++        return CATEGORY_GROUP
+@@
+ def generate_person_clue(
+     candidate: Candidate,
+     processor: TextProcessor,
+     payload: ChapterPayload,
+     existing_signatures: Set[str],
+ ) -> str:
+-    doc = payload.doc
+-    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+-    context_words: Set[str] = set()
+-    if token is not None:
+-        for word in token.sent:
+-            norm = processor.normalize_token(word.text)
+-            if norm:
+-                context_words.add(norm)
+-    role = infer_role(candidate.word, context_words, payload.vocab)
+-    role_phrase = role.capitalize() if role else "Figure"
+-    verb_phrases = candidate.context_phrases or (extract_verb_phrases(token, candidate.word) if token else [])
+-    hints = extract_hint_phrases(context_words)
+-    clue_body = ""
+-    if verb_phrases:
+-        clue_body = verb_phrases[0]
+-        if hints and hints[0] not in clue_body:
+-            clue_body = f"{clue_body}, {hints[0]}"
+-    else:
+-        summary = summarize_context(token, candidate.word, CATEGORY_PERSON)
+-        if summary:
+-            clue_body = summary
+-    if not clue_body:
+-        clue_body = "plays a key role in this chapter"
+-    clue = f"{role_phrase} who {clue_body}"
+-    clue = remove_answer_from_clue(clue, candidate.word)
+-    clue = finalize_clue(clue)
+-    return ensure_unique_structure(clue, token, candidate, existing_signatures)
++    doc = payload.doc
++    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
++    context_words: Set[str] = {processor.normalize_token(w.text) for w in token.sent} if token else set()
++    role = infer_role(candidate.word, context_words, payload.vocab)
++    role_phrase = role.capitalize() if role else "Figure"
++    summary = summarize_context(token, candidate.word, CATEGORY_PERSON) or "plays a key role in this chapter"
++    clue_raw = f"{role_phrase} who {summary}"
++    clue = remove_answer_from_clue(clue_raw, candidate.word)
++    clue = finalize_clue(clue)
++    return ensure_unique_structure(clue, token, candidate, existing_signatures)
++
++
++def generate_group_clue(
++    candidate: Candidate,
++    processor: TextProcessor,
++    payload: ChapterPayload,
++    existing_signatures: Set[str],
++) -> str:
++    doc = payload.doc
++    token = doc[candidate.token_index] if doc is not None else None
++    context = summarize_context(token, candidate.word, CATEGORY_GROUP)
++    if not context:
++        context = "people mentioned in this chapter"
++    clue_raw = f"Group identified as {context}"
++    clue = remove_answer_from_clue(clue_raw, candidate.word)
++    clue = finalize_clue(clue)
++    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+@@
+ def generate_clue(
+     candidate: Candidate,
+     processor: TextProcessor,
+     payload: ChapterPayload,
+     existing_signatures: Set[str],
+ ) -> str:
+-    if candidate.category == CATEGORY_PERSON:
+-        return generate_person_clue(candidate, processor, payload, existing_signatures)
+-    if candidate.category == CATEGORY_PLACE:
+-        return generate_place_clue(candidate, processor, payload, existing_signatures)
+-    if candidate.category == CATEGORY_OBJECT:
+-        return generate_object_clue(candidate, processor, payload, existing_signatures)
+-    if candidate.category == CATEGORY_THEOLOGY:
+-        return generate_theology_clue(candidate, processor, payload, existing_signatures)
+-    return generate_generic_clue(candidate, processor, payload, existing_signatures)
++    if candidate.category == CATEGORY_PERSON:
++        return generate_person_clue(candidate, processor, payload, existing_signatures)
++    if candidate.category == CATEGORY_GROUP:
++        return generate_group_clue(candidate, processor, payload, existing_signatures)
++    if candidate.category == CATEGORY_PLACE:
++        return generate_place_clue(candidate, processor, payload, existing_signatures)
++    if candidate.category == CATEGORY_OBJECT:
++        return generate_object_clue(candidate, processor, payload, existing_signatures)
++    if candidate.category == CATEGORY_THEOLOGY:
++        return generate_theology_clue(candidate, processor, payload, existing_signatures)
++    return generate_generic_clue(candidate, processor, payload, existing_signatures)

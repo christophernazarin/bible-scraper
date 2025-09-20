@@ -1105,13 +1105,11 @@ def select_candidates(candidates: List[Candidate]) -> List[Candidate]:
             seen_stems.add(cand.stem)
         if cand.synset_lemmas:
             seen_syns.update(cand.synset_lemmas)
-
     category_map: Dict[str, List[Candidate]] = defaultdict(list)
     for cand in unique:
         category_map[cand.category].append(cand)
     for cat_list in category_map.values():
         cat_list.sort(key=lambda c: (-c.score, c.word))
-
     final: List[Candidate] = []
     used_words: Set[str] = set()
 
@@ -1119,8 +1117,7 @@ def select_candidates(candidates: List[Candidate]) -> List[Candidate]:
         final.append(c)
         used_words.add(c.word)
 
-    # Satisfy minimum per-category requirements
-    for category, required in CATEGORY_REQUIREMENTS:
+
         cat_list = category_map.get(category, [])
         count = 0
         while cat_list and count < required and len(final) < MAX_WORD_COUNT:
@@ -1131,12 +1128,12 @@ def select_candidates(candidates: List[Candidate]) -> List[Candidate]:
             count += 1
 
     target = min(MAX_WORD_COUNT, max(MIN_WORD_COUNT, min(TARGET_WORD_COUNT, len(unique))))
-
-    # Fill remaining by priority
     while len(final) < target:
         added = False
         for category in CATEGORY_PRIORITY_ORDER:
-            cat_list = category_map.get(category, [])
+            cat_list = category_map.get(category, []
+
+
             while cat_list:
                 cand = cat_list.pop(0)
                 if cand.word in used_words:
@@ -1149,7 +1146,6 @@ def select_candidates(candidates: List[Candidate]) -> List[Candidate]:
         if not added:
             break
 
-    # If still short, take anything remaining (best-first)
     if len(final) < MIN_WORD_COUNT:
         for cat_list in category_map.values():
             while cat_list and len(final) < min(MAX_WORD_COUNT, len(unique)):
@@ -1159,6 +1155,7 @@ def select_candidates(candidates: List[Candidate]) -> List[Candidate]:
                 take_candidate(cand)
 
     return final[:MAX_WORD_COUNT]
+
 def infer_role(name: str, context_words: Set[str], chapter_words: Set[str]) -> str:
     upper_name = name.upper()
     rules = SPECIAL_NAME_RULES.get(upper_name)
@@ -1217,7 +1214,6 @@ def extract_verb_phrases(token: Any, answer: str) -> List[str]:
             break
     return phrases
 
-
 def generate_person_clue(
     candidate: Candidate,
     processor: TextProcessor,
@@ -1252,6 +1248,96 @@ def generate_person_clue(
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
 def build_place_description(token: Any, answer: str) -> str:
     if token is None:
@@ -1273,7 +1359,9 @@ def build_place_description(token: Any, answer: str) -> str:
     subject = get_subject_phrase(governing, answer)
     verb_phrase = build_verb_phrase(governing, answer)
     if not verb_phrase:
-        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
+        verb_phrase = third_person(
+            governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text
+        )
     prep_text = preposition.text.lower() if preposition is not None else "at"
     if subject:
         return f"{subject} {verb_phrase} {prep_text} this place"
@@ -1296,6 +1384,97 @@ def generate_place_clue(
     if not description:
         description = "is a location highlighted in this chapter"
     clue_raw = _enforce_category_opening(CATEGORY_PLACE, description)
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
     clue = remove_answer_from_clue(clue_raw, candidate.word)
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
@@ -1351,6 +1530,97 @@ def generate_object_clue(
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
 
 def build_theology_description(token: Any, answer: str) -> str:
     if token is None:
@@ -1402,6 +1672,97 @@ def generate_theology_clue(
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
 
 def generate_generic_clue(
     candidate: Candidate,
@@ -1415,6 +1776,97 @@ def generate_generic_clue(
     if not summary:
         summary = "mentioned in this chapter"
     clue = remove_answer_from_clue(summary, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    clue = finalize_clue(clue)
+    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+
+    candidate: Candidate,
+    processor: TextProcessor,
+    payload: ChapterPayload,
+    existing_signatures: Set[str],
+) -> str:
+    doc = payload.doc
+    token = doc[candidate.token_index] if doc is not None else None
+    if not context:
+        context = "people mentioned in this chapter"
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
@@ -1434,6 +1886,7 @@ def generate_clue(
     if candidate.category == CATEGORY_THEOLOGY:
         return generate_theology_clue(candidate, processor, payload, existing_signatures)
     return generate_generic_clue(candidate, processor, payload, existing_signatures)
+
 def parse_books(book_str: Optional[str]) -> List[BookMetadata]:
     if not book_str:
         return BOOKS
@@ -1497,11 +1950,6 @@ class WldehCdnClient:
         self.cache_root = cache_dir / "wldeh" / self.version
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
-        # Be polite to CDN: identify client (and ignore if anything goes wrong)
-        try:
-            self.session.headers.update({"User-Agent": "BibleScraper/1.0 (+https://github.com/yourrepo)"})
-        except Exception:
-            pass
 
     @property
     def header_id(self) -> str:
@@ -1515,7 +1963,9 @@ class WldehCdnClient:
         chapters = list(range(1, book.chapters + 1))
         payloads: List[ChapterPayload] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(self._load_chapter, book, chapter): chapter for chapter in chapters}
+            future_map = {
+                executor.submit(self._load_chapter, book, chapter): chapter for chapter in chapters
+            }
             for future in concurrent.futures.as_completed(future_map):
                 payloads.append(future.result())
         payloads.sort(key=lambda item: item.chapter)
@@ -1557,9 +2007,7 @@ class WldehCdnClient:
         if response.status_code == 404:
             raise RuntimeError(f"Chapter not found: {book.id} {chapter}")
         if response.status_code >= 400:
-            # Fall back to verse-by-verse on 4xx/5xx
-            content = self._fetch_per_verse(book, chapter)
-            return {"data": {"content": content}}
+            raise RuntimeError(f"HTTP error {response.status_code} for {url}")
         try:
             raw = response.json()
         except json.JSONDecodeError as exc:
@@ -1596,18 +2044,11 @@ class WldehCdnClient:
     def _fetch_per_verse(self, book: BookMetadata, chapter: int) -> str:
         verses: List[str] = []
         verse = 1
-        consecutive_403 = 0
         while verse <= 200:
             url = f"{self.base_url}/{self.version}/books/{book.slug}/chapters/{chapter}/verses/{verse}.json"
             response = self.session.get(url, timeout=REQUEST_TIMEOUT)
             if response.status_code == 404:
                 break
-            if response.status_code == 403:
-                consecutive_403 += 1
-                time.sleep(0.35)
-                if consecutive_403 >= 3:
-                    break
-                continue
             if response.status_code >= 400:
                 raise RuntimeError(f"HTTP error {response.status_code} for {url}")
             try:
@@ -1617,8 +2058,6 @@ class WldehCdnClient:
             part = self._coalesce_text(raw)
             if part:
                 verses.append(part)
-            consecutive_403 = 0
-            time.sleep(0.12)
             verse += 1
         return " ".join(verses)
 
@@ -1630,11 +2069,6 @@ class ApiBibleClient:
         self.cache_root = cache_dir / bible_id
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
-        # Be polite to CDN: identify client
-        try:
-            self.session.headers.update({"User-Agent": "BibleScraper/1.0 (+https://example.local)"})
-        except Exception:
-            pass
 
     @property
     def header_id(self) -> str:
@@ -1849,9 +2283,6 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
-
-
-
 
 
 

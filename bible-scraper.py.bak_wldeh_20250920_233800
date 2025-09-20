@@ -1497,13 +1497,19 @@ class WldehCdnClient:
         self.cache_root = cache_dir / "wldeh" / self.version
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.session = requests.Session()
-        # Be polite to CDN: identify client (and ignore if anything goes wrong)
+        # Be polite to CDN: identify client
         try:
-            self.session.headers.update({"User-Agent": "BibleScraper/1.0 (+https://github.com/yourrepo)"})
+            self.session.headers.update({"User-Agent": "BibleScraper/1.0 (+https://example.local)"})
         except Exception:
             pass
 
-    @property
+    
+        # Be polite to CDN: identify client
+        try:
+            self.session.headers.update({"User-Agent": "BibleScraper/1.0 (+https://example.local)"})
+        except Exception:
+            pass
+@property
     def header_id(self) -> str:
         return f"wldeh:{self.version}"
 
@@ -1515,7 +1521,9 @@ class WldehCdnClient:
         chapters = list(range(1, book.chapters + 1))
         payloads: List[ChapterPayload] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(self._load_chapter, book, chapter): chapter for chapter in chapters}
+            future_map = {
+                executor.submit(self._load_chapter, book, chapter): chapter for chapter in chapters
+            }
             for future in concurrent.futures.as_completed(future_map):
                 payloads.append(future.result())
         payloads.sort(key=lambda item: item.chapter)
@@ -1557,9 +1565,7 @@ class WldehCdnClient:
         if response.status_code == 404:
             raise RuntimeError(f"Chapter not found: {book.id} {chapter}")
         if response.status_code >= 400:
-            # Fall back to verse-by-verse on 4xx/5xx
-            content = self._fetch_per_verse(book, chapter)
-            return {"data": {"content": content}}
+            raise RuntimeError(f"HTTP error {response.status_code} for {url}")
         try:
             raw = response.json()
         except json.JSONDecodeError as exc:
@@ -1600,12 +1606,15 @@ class WldehCdnClient:
         while verse <= 200:
             url = f"{self.base_url}/{self.version}/books/{book.slug}/chapters/{chapter}/verses/{verse}.json"
             response = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            # Normal end of chapter
             if response.status_code == 404:
                 break
+            # Gentle handling of rate limiting
             if response.status_code == 403:
                 consecutive_403 += 1
-                time.sleep(0.35)
+                time.sleep(0.35)  # brief backoff
                 if consecutive_403 >= 3:
+                    # stop trying further verses; return what we have
                     break
                 continue
             if response.status_code >= 400:
@@ -1617,6 +1626,7 @@ class WldehCdnClient:
             part = self._coalesce_text(raw)
             if part:
                 verses.append(part)
+            # reset 403 counter on success; small pace delay to avoid rate limits
             consecutive_403 = 0
             time.sleep(0.12)
             verse += 1
@@ -1849,7 +1859,6 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
-
 
 
 
