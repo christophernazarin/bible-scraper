@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import concurrent.futures
 import datetime
 import html
@@ -766,6 +766,7 @@ def extract_local_context(sent: Any, answer: str, window: int = 8) -> str:
     snippet = re.sub(r"\s+", " ", snippet)
     snippet = re.sub(r"\d+:\d+", "", snippet)
     snippet = snippet.strip(" ,.;:-")
+    snippet = _backfill_bare_function_words(snippet)
     return snippet
 
 
@@ -1178,7 +1179,7 @@ def generate_person_clue(
             if norm:
                 context_words.add(norm)
     role = infer_role(candidate.word, context_words, payload.vocab)
-    role_phrase = role.capitalize() if role else "Figure"
+    role_phrase = (role.capitalize() if role and role.lower() not in {"man", "woman"} else "Figure")
     verb_phrases = candidate.context_phrases or (extract_verb_phrases(token, candidate.word) if token else [])
     hints = extract_hint_phrases(context_words)
     clue_body = ""
@@ -1192,8 +1193,8 @@ def generate_person_clue(
             clue_body = summary
     if not clue_body:
         clue_body = "plays a key role in this chapter"
-    clue = f"{role_phrase} who {clue_body}"
-    clue = remove_answer_from_clue(clue, candidate.word)
+    clue_raw = _enforce_category_opening(CATEGORY_PERSON, clue_body, role_phrase=role_phrase)
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
@@ -1241,8 +1242,8 @@ def generate_place_clue(
             description = summary
     if not description:
         description = "is a location highlighted in this chapter"
-    clue = f"Where {description}"
-    clue = remove_answer_from_clue(clue, candidate.word)
+    clue_raw = _enforce_category_opening(CATEGORY_PLACE, description)
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
@@ -1292,9 +1293,8 @@ def generate_object_clue(
             description = summary
     if not description:
         description = "object highlighted in this passage"
-    clue = remove_answer_from_clue(description, candidate.word)
-    if clue and not clue.lower().startswith(("this", "these", "it", "symbol", "item")):
-        clue = f"This {clue}" if not clue.lower().startswith("this ") else clue
+    clue_raw = _enforce_category_opening(CATEGORY_OBJECT, description, object_hypernym="object")
+    clue = remove_answer_from_clue(clue_raw, candidate.word)
     clue = finalize_clue(clue)
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
@@ -1778,3 +1778,4 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
+
