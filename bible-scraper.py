@@ -1265,7 +1265,7 @@ THEOLOGICAL_GLOSSES: Dict[str, str] = {
     "RESURRECTION": "rising from death",
     "COVENANT": "binding promise",
     "ATONEMENT": "reconciliation with God",
-    "SPIRIT": "Godâ€™s empowering presence",
+    "SPIRIT": "God's empowering presence",
     "TRUTH": "what accords with God",
     "SALVATION": "deliverance from sin",
 }
@@ -1312,12 +1312,12 @@ def _compose_theology_clue(candidate: Candidate, token: Optional[Any]) -> str:
     return f"Concept {body}"
 
 def _compose_group_clue(candidate: Candidate, token: Optional[Any]) -> str:
-    # Handles words like â€œLevitesâ€, â€œPhariseesâ€, â€œCretansâ€, and nationality/ethnonyms (â€œ-itesâ€, â€œ-ansâ€)
+    # Handles words like "Levites", "Pharisees", "Cretans", and nationality/ethnonyms ("-ites", "-ans")
     snippet = summarize_context(token, candidate.word, CATEGORY_OBJECT)  # neutral phrasing
     if not snippet:
-        snippet = "people mentioned in this chapter"
-    # Safer opening than â€œFigureâ€: emphasize collectivity
-    return f"Collective group identified as {snippet}"
+        snippet = "mentioned in this chapter"
+    # Safer opening than "Figure": emphasize collectivity
+    return f"Collective group {snippet}"
 
 def knowledge_enriched_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
     doc = payload.doc
