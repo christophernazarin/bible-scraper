@@ -1291,13 +1291,13 @@ def _compose_person_clue(candidate: Candidate, token: Optional[Any], processor: 
 def _compose_place_clue(candidate: Candidate, token: Optional[Any]) -> str:
     body = build_place_description(token, candidate.word)
     if not body:
-        body = summarize_context(token, candidate.word, CATEGORY_PLACE) or "is a location highlighted in this chapter"
+        body = summarize_context(token, candidate.word, CATEGORY_PLACE) or "key events occur in this chapter"
     return _enforce_category_opening(CATEGORY_PLACE, body)
 
 def _compose_object_clue(candidate: Candidate, token: Optional[Any]) -> str:
     body = build_object_description(token, candidate.word)
     if not body:
-        body = summarize_context(token, candidate.word, CATEGORY_OBJECT) or "object highlighted in this passage"
+        body = summarize_context(token, candidate.word, CATEGORY_OBJECT) or "is highlighted in this passage"
     return _enforce_category_opening(CATEGORY_OBJECT, body, object_hypernym="object")
 
 def _compose_theology_clue(candidate: Candidate, token: Optional[Any]) -> str:
@@ -1783,24 +1783,6 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    sys.exit(run())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # --- restored helper: build_object_description ---
@@ -1917,4 +1899,8 @@ def build_theology_description(token: Any, answer: str) -> str:
             if frag:
                 return frag
     return ""
+
+
+if __name__ == "__main__":
+    sys.exit(run())
 
