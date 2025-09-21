@@ -891,6 +891,95 @@ def extract_local_context(sent: Any, answer: str, window: int = 8) -> str:
     return snippet
 
 
+CONNECTOR_WORDS: Set[str] = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "after",
+    "although",
+    "amid",
+    "among",
+    "around",
+    "before",
+    "because",
+    "beside",
+    "besides",
+    "by",
+    "during",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "lest",
+    "near",
+    "of",
+    "on",
+    "once",
+    "onto",
+    "over",
+    "since",
+    "that",
+    "the",
+    "though",
+    "through",
+    "throughout",
+    "to",
+    "toward",
+    "towards",
+    "under",
+    "until",
+    "upon",
+    "when",
+    "whenever",
+    "where",
+    "wherever",
+    "while",
+    "with",
+    "within",
+    "without",
+}
+
+CONNECTOR_PREFIXES: Tuple[str, ...] = tuple(sorted({f"{word} " for word in CONNECTOR_WORDS if word not in {"the", "a", "an", "and"}}))
+
+
+def _normalize_leading_connector(snippet: str) -> str:
+    if not snippet:
+        return snippet
+    leading_ws_len = len(snippet) - len(snippet.lstrip())
+    leading_ws = snippet[:leading_ws_len]
+    remainder = snippet[leading_ws_len:]
+    quote_prefix = ""
+    while remainder and remainder[0] in '"\'“”‘’(':
+        quote_prefix += remainder[0]
+        remainder = remainder[1:]
+    match = re.match(r"([A-Za-z]+)(.*)", remainder)
+    if not match:
+        return snippet
+    first_word, rest = match.groups()
+    lowered = first_word.lower()
+    if lowered in CONNECTOR_WORDS:
+        normalized_first = lowered
+    else:
+        normalized_first = first_word
+    return leading_ws + quote_prefix + normalized_first + rest
+
+
+def _ensure_connector(snippet: str, default: str) -> str:
+    if not snippet:
+        return snippet
+    check_segment = snippet
+    while check_segment and check_segment[0] in '"\'“”‘’(':
+        check_segment = check_segment[1:]
+    lowered = check_segment.lower()
+    for prefix in CONNECTOR_PREFIXES:
+        if lowered.startswith(prefix):
+            return snippet
+    return f"{default} {snippet}"
+
+
 def summarize_context(token: Any, answer: str, category: str) -> str:
     if token is None:
         return ""
@@ -898,15 +987,20 @@ def summarize_context(token: Any, answer: str, category: str) -> str:
     snippet = remove_answer_from_clue(snippet, answer)
     if not snippet:
         return ""
-    snippet = snippet.lstrip(" ,;:")
-    lower = snippet.lower()
+    snippet = snippet.strip(" ,;:")
+    snippet = _normalize_leading_connector(snippet)
     if category == CATEGORY_PLACE:
-        return f"key events unfold {lower}"
+        clause = _ensure_connector(snippet, "when")
+        clause = _normalize_leading_connector(clause)
+        return sanitize_clause(f"key events unfold {clause}")
     if category == CATEGORY_OBJECT:
-        return f"mentioned when {lower}"
+        clause = _ensure_connector(snippet, "when")
+        clause = _normalize_leading_connector(clause)
+        return sanitize_clause(f"is mentioned {clause}")
     if category == CATEGORY_THEOLOGY:
-        return f"described as {lower}"
-    return snippet
+        clause = _normalize_leading_connector(snippet)
+        return sanitize_clause(f"is described as {clause}")
+    return sanitize_clause(snippet)
 
 
 def finalize_clue(text: str) -> str:
