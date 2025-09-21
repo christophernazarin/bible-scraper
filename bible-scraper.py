@@ -752,9 +752,63 @@ def _enforce_category_opening(category: str, body: str, *,
     if category == CATEGORY_PLACE:
         return "Place where " + re.sub(r"^\s*where\s+", "", raw, flags=re.IGNORECASE)
     if category == CATEGORY_OBJECT:
-        if not re.match(r"^\s*this\b", raw, flags=re.IGNORECASE):
-            raw = f"{object_hypernym} {raw}"
-        return "This " + raw.lstrip()
+        def starts_with_copula(text: str) -> bool:
+            lowered = text.lower()
+            prefixes = (
+                "is ",
+                "are ",
+                "was ",
+                "were ",
+                "has ",
+                "have ",
+                "had ",
+                "can ",
+                "may ",
+                "might ",
+                "must ",
+                "should ",
+                "shall ",
+                "will ",
+                "would ",
+                "could ",
+                "does ",
+                "do ",
+                "did ",
+                "be ",
+                "becomes ",
+                "become ",
+                "serves ",
+                "signifies ",
+                "marks ",
+            )
+            return any(lowered.startswith(pref) for pref in prefixes)
+
+        stripped = raw.strip()
+        if not stripped:
+            return f"This {object_hypernym}"
+        if re.match(r"^\s*this\b", stripped, flags=re.IGNORECASE):
+            cleaned = stripped.lstrip()
+            return cleaned[0].upper() + cleaned[1:] if cleaned else f"This {object_hypernym}"
+
+        if re.search(r"(?:[,;:\s]+)?this[.?!]*$", stripped, flags=re.IGNORECASE):
+            trimmed = re.sub(r"(?:[,;:\s]+)?this[.?!]*$", "", stripped, flags=re.IGNORECASE).strip(" ,;:")
+            if trimmed:
+                if starts_with_copula(trimmed):
+                    body = trimmed
+                elif trimmed.lower().startswith(("something ", "someone ", "somebody ", "somewhere ")):
+                    body = trimmed
+                    if not body.lower().startswith("is "):
+                        body = f"is {body[0].lower() + body[1:]}"
+                else:
+                    body = f"is something {trimmed}"
+                return f"This {object_hypernym} {body}"
+            return f"This {object_hypernym}"
+
+        if starts_with_copula(stripped):
+            return f"This {object_hypernym} {stripped}"
+        if stripped.lower().startswith(("something ", "someone ", "somebody ", "somewhere ")):
+            return f"This {object_hypernym} is {stripped}"
+        return f"This {object_hypernym} is something {stripped}"
     return raw
 
 
@@ -847,7 +901,7 @@ def summarize_context(token: Any, answer: str, category: str) -> str:
     snippet = snippet.lstrip(" ,;:")
     lower = snippet.lower()
     if category == CATEGORY_PLACE:
-        return f"events such as {lower}"
+        return f"key events unfold {lower}"
     if category == CATEGORY_OBJECT:
         return f"mentioned when {lower}"
     if category == CATEGORY_THEOLOGY:
@@ -1817,13 +1871,30 @@ def build_object_description(token: Any, answer: str) -> str:
     subject = get_subject_phrase(verb, answer)
     verb_phrase = build_verb_phrase(verb, answer)
     # Prefer preposition if we really have one
-    if preposition is not None and subject:
-        return f"{subject} {verb_phrase} {preposition.text.lower()} this"
-    if subject and verb_phrase:
-        return f"{subject} {verb_phrase} this"
+    verb_base = verb.lemma_.lower() if verb.lemma_ != "-PRON-" else verb.text.lower()
+    normalized_phrase = ""
     if verb_phrase:
-        return f"{verb_phrase.capitalize()} this"
-    return ""
+        parts = verb_phrase.split()
+        if parts:
+            parts[0] = verb_base
+            normalized_phrase = " ".join(parts)
+    else:
+        normalized_phrase = verb_base
+
+    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
+        normalized_phrase = ""
+
+    segments: List[str] = []
+    if subject and normalized_phrase:
+        segments.append(f"{subject} {normalized_phrase}")
+    elif normalized_phrase:
+        segments.append(normalized_phrase)
+
+    if preposition is not None and segments:
+        segments[-1] = segments[-1] + f" {preposition.text.lower()}"
+
+    clause = " ".join(segments)
+    return sanitize_clause(clause)
 
 
 # --- restored helper: build_place_description ---
@@ -1855,11 +1926,28 @@ def build_place_description(token: Any, answer: str) -> str:
     verb_phrase = build_verb_phrase(governing, answer)
     if not verb_phrase:
         verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
-    prep_text = preposition.text.lower() if preposition is not None else "at"
 
-    if subject:
-        return f"{subject} {verb_phrase} {prep_text} this place"
-    return f"{verb_phrase.capitalize()} {prep_text} this place"
+    verb_base = governing.lemma_.lower() if governing.lemma_ != "-PRON-" else governing.text.lower()
+    normalized_phrase = ""
+    if verb_phrase:
+        parts = verb_phrase.split()
+        if parts:
+            parts[0] = verb_base
+            normalized_phrase = " ".join(parts)
+    else:
+        normalized_phrase = verb_base
+
+    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
+        normalized_phrase = ""
+
+    pieces: List[str] = []
+    if subject and normalized_phrase:
+        pieces.append(f"{subject} {normalized_phrase}")
+    elif normalized_phrase:
+        pieces.append(normalized_phrase)
+
+    clause = " ".join(pieces)
+    return sanitize_clause(clause)
 
 
 # --- restored helper: build_theology_description ---
