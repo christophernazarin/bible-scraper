@@ -752,9 +752,63 @@ def _enforce_category_opening(category: str, body: str, *,
     if category == CATEGORY_PLACE:
         return "Place where " + re.sub(r"^\s*where\s+", "", raw, flags=re.IGNORECASE)
     if category == CATEGORY_OBJECT:
-        if not re.match(r"^\s*this\b", raw, flags=re.IGNORECASE):
-            raw = f"{object_hypernym} {raw}"
-        return "This " + raw.lstrip()
+        def starts_with_copula(text: str) -> bool:
+            lowered = text.lower()
+            prefixes = (
+                "is ",
+                "are ",
+                "was ",
+                "were ",
+                "has ",
+                "have ",
+                "had ",
+                "can ",
+                "may ",
+                "might ",
+                "must ",
+                "should ",
+                "shall ",
+                "will ",
+                "would ",
+                "could ",
+                "does ",
+                "do ",
+                "did ",
+                "be ",
+                "becomes ",
+                "become ",
+                "serves ",
+                "signifies ",
+                "marks ",
+            )
+            return any(lowered.startswith(pref) for pref in prefixes)
+
+        stripped = raw.strip()
+        if not stripped:
+            return f"This {object_hypernym}"
+        if re.match(r"^\s*this\b", stripped, flags=re.IGNORECASE):
+            cleaned = stripped.lstrip()
+            return cleaned[0].upper() + cleaned[1:] if cleaned else f"This {object_hypernym}"
+
+        if re.search(r"(?:[,;:\s]+)?this[.?!]*$", stripped, flags=re.IGNORECASE):
+            trimmed = re.sub(r"(?:[,;:\s]+)?this[.?!]*$", "", stripped, flags=re.IGNORECASE).strip(" ,;:")
+            if trimmed:
+                if starts_with_copula(trimmed):
+                    body = trimmed
+                elif trimmed.lower().startswith(("something ", "someone ", "somebody ", "somewhere ")):
+                    body = trimmed
+                    if not body.lower().startswith("is "):
+                        body = f"is {body[0].lower() + body[1:]}"
+                else:
+                    body = f"is something {trimmed}"
+                return f"This {object_hypernym} {body}"
+            return f"This {object_hypernym}"
+
+        if starts_with_copula(stripped):
+            return f"This {object_hypernym} {stripped}"
+        if stripped.lower().startswith(("something ", "someone ", "somebody ", "somewhere ")):
+            return f"This {object_hypernym} is {stripped}"
+        return f"This {object_hypernym} is something {stripped}"
     return raw
 
 
@@ -837,6 +891,95 @@ def extract_local_context(sent: Any, answer: str, window: int = 8) -> str:
     return snippet
 
 
+CONNECTOR_WORDS: Set[str] = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "after",
+    "although",
+    "amid",
+    "among",
+    "around",
+    "before",
+    "because",
+    "beside",
+    "besides",
+    "by",
+    "during",
+    "for",
+    "from",
+    "if",
+    "in",
+    "into",
+    "lest",
+    "near",
+    "of",
+    "on",
+    "once",
+    "onto",
+    "over",
+    "since",
+    "that",
+    "the",
+    "though",
+    "through",
+    "throughout",
+    "to",
+    "toward",
+    "towards",
+    "under",
+    "until",
+    "upon",
+    "when",
+    "whenever",
+    "where",
+    "wherever",
+    "while",
+    "with",
+    "within",
+    "without",
+}
+
+CONNECTOR_PREFIXES: Tuple[str, ...] = tuple(sorted({f"{word} " for word in CONNECTOR_WORDS if word not in {"the", "a", "an", "and"}}))
+
+
+def _normalize_leading_connector(snippet: str) -> str:
+    if not snippet:
+        return snippet
+    leading_ws_len = len(snippet) - len(snippet.lstrip())
+    leading_ws = snippet[:leading_ws_len]
+    remainder = snippet[leading_ws_len:]
+    quote_prefix = ""
+    while remainder and remainder[0] in '"\'“”‘’(':
+        quote_prefix += remainder[0]
+        remainder = remainder[1:]
+    match = re.match(r"([A-Za-z]+)(.*)", remainder)
+    if not match:
+        return snippet
+    first_word, rest = match.groups()
+    lowered = first_word.lower()
+    if lowered in CONNECTOR_WORDS:
+        normalized_first = lowered
+    else:
+        normalized_first = first_word
+    return leading_ws + quote_prefix + normalized_first + rest
+
+
+def _ensure_connector(snippet: str, default: str) -> str:
+    if not snippet:
+        return snippet
+    check_segment = snippet
+    while check_segment and check_segment[0] in '"\'“”‘’(':
+        check_segment = check_segment[1:]
+    lowered = check_segment.lower()
+    for prefix in CONNECTOR_PREFIXES:
+        if lowered.startswith(prefix):
+            return snippet
+    return f"{default} {snippet}"
+
+
 def summarize_context(token: Any, answer: str, category: str) -> str:
     if token is None:
         return ""
@@ -844,15 +987,20 @@ def summarize_context(token: Any, answer: str, category: str) -> str:
     snippet = remove_answer_from_clue(snippet, answer)
     if not snippet:
         return ""
-    snippet = snippet.lstrip(" ,;:")
-    lower = snippet.lower()
+    snippet = snippet.strip(" ,;:")
+    snippet = _normalize_leading_connector(snippet)
     if category == CATEGORY_PLACE:
-        return f"events such as {lower}"
+        clause = _ensure_connector(snippet, "when")
+        clause = _normalize_leading_connector(clause)
+        return sanitize_clause(f"key events unfold {clause}")
     if category == CATEGORY_OBJECT:
-        return f"mentioned when {lower}"
+        clause = _ensure_connector(snippet, "when")
+        clause = _normalize_leading_connector(clause)
+        return sanitize_clause(f"is mentioned {clause}")
     if category == CATEGORY_THEOLOGY:
-        return f"described as {lower}"
-    return snippet
+        clause = _normalize_leading_connector(snippet)
+        return sanitize_clause(f"is described as {clause}")
+    return sanitize_clause(snippet)
 
 
 def finalize_clue(text: str) -> str:
@@ -1265,7 +1413,7 @@ THEOLOGICAL_GLOSSES: Dict[str, str] = {
     "RESURRECTION": "rising from death",
     "COVENANT": "binding promise",
     "ATONEMENT": "reconciliation with God",
-    "SPIRIT": "Godâ€™s empowering presence",
+    "SPIRIT": "God's empowering presence",
     "TRUTH": "what accords with God",
     "SALVATION": "deliverance from sin",
 }
@@ -1288,16 +1436,154 @@ def _compose_person_clue(candidate: Candidate, token: Optional[Any], processor: 
     raw = _enforce_category_opening(CATEGORY_PERSON, body, role_phrase=role_phrase)
     return raw
 
+
+def build_object_description(token: Any, answer: str) -> str:
+    """Compose a short clause describing how the object participates in the sentence."""
+    if token is None:
+        return ""
+    verb = None
+    preposition = None
+
+    # Direct object / attribute / prepositional object patterns
+    if token.dep_ in {"dobj", "obj"}:
+        verb = token.head
+    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        verb = preposition.head
+    elif token.dep_ == "attr":
+        verb = token.head
+    else:
+        # Walk up to find governing verb
+        for anc in token.ancestors:
+            if anc.pos_ == "VERB":
+                verb = anc
+                break
+
+    if verb is None:
+        return ""
+
+    subject = get_subject_phrase(verb, answer)
+    verb_phrase = build_verb_phrase(verb, answer)
+    # Prefer preposition if we really have one
+    verb_base = verb.lemma_.lower() if verb.lemma_ != "-PRON-" else verb.text.lower()
+    normalized_phrase = ""
+    if verb_phrase:
+        parts = verb_phrase.split()
+        if parts:
+            parts[0] = verb_base
+            normalized_phrase = " ".join(parts)
+    else:
+        normalized_phrase = verb_base
+
+    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
+        normalized_phrase = ""
+
+    segments: List[str] = []
+    if subject and normalized_phrase:
+        segments.append(f"{subject} {normalized_phrase}")
+    elif normalized_phrase:
+        segments.append(normalized_phrase)
+
+    if preposition is not None and segments:
+        segments[-1] = segments[-1] + f" {preposition.text.lower()}"
+
+    clause = " ".join(segments)
+    return sanitize_clause(clause)
+
+
+def build_place_description(token: Any, answer: str) -> str:
+    """Compose a clause about what happens at/with the place."""
+    if token is None:
+        return ""
+    governing = None
+    preposition = None
+
+    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        governing = preposition.head
+    elif token.dep_ in {"nsubj", "nsubjpass"}:
+        governing = token.head
+    else:
+        for anc in token.ancestors:
+            if anc.pos_ == "VERB":
+                governing = anc
+                break
+
+    if governing is None:
+        return ""
+
+    subject = get_subject_phrase(governing, answer)
+    verb_phrase = build_verb_phrase(governing, answer)
+    if not verb_phrase:
+        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
+
+    verb_base = governing.lemma_.lower() if governing.lemma_ != "-PRON-" else governing.text.lower()
+    normalized_phrase = ""
+    if verb_phrase:
+        parts = verb_phrase.split()
+        if parts:
+            parts[0] = verb_base
+            normalized_phrase = " ".join(parts)
+    else:
+        normalized_phrase = verb_base
+
+    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
+        normalized_phrase = ""
+
+    pieces: List[str] = []
+    if subject and normalized_phrase:
+        pieces.append(f"{subject} {normalized_phrase}")
+    elif normalized_phrase:
+        pieces.append(normalized_phrase)
+
+    clause = " ".join(pieces)
+    return sanitize_clause(clause)
+
+
+def build_theology_description(token: Any, answer: str) -> str:
+    """Compose a clause describing how the theology term functions in context."""
+    if token is None:
+        return ""
+    verb = None
+
+    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
+        head = token.head
+        if head is not None and head.pos_ == "VERB":
+            verb = head
+    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
+        verb = token
+
+    if verb is not None:
+        subject = get_subject_phrase(verb, answer)
+        verb_phrase = build_verb_phrase(verb, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+        if verb_phrase:
+            return verb_phrase.capitalize()
+
+    if token.dep_ == "attr" and token.head.pos_ == "VERB":
+        subject = get_subject_phrase(token.head, answer)
+        verb_phrase = build_verb_phrase(token.head, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+
+    for child in token.children:
+        if child.dep_ == "relcl":
+            frag = format_subtree_tokens(child.subtree, answer)
+            if frag:
+                return frag
+    return ""
+
 def _compose_place_clue(candidate: Candidate, token: Optional[Any]) -> str:
     body = build_place_description(token, candidate.word)
     if not body:
-        body = summarize_context(token, candidate.word, CATEGORY_PLACE) or "is a location highlighted in this chapter"
+        body = summarize_context(token, candidate.word, CATEGORY_PLACE) or "key events occur in this chapter"
     return _enforce_category_opening(CATEGORY_PLACE, body)
 
 def _compose_object_clue(candidate: Candidate, token: Optional[Any]) -> str:
     body = build_object_description(token, candidate.word)
     if not body:
-        body = summarize_context(token, candidate.word, CATEGORY_OBJECT) or "object highlighted in this passage"
+        body = summarize_context(token, candidate.word, CATEGORY_OBJECT) or "is highlighted in this passage"
     return _enforce_category_opening(CATEGORY_OBJECT, body, object_hypernym="object")
 
 def _compose_theology_clue(candidate: Candidate, token: Optional[Any]) -> str:
@@ -1312,12 +1598,12 @@ def _compose_theology_clue(candidate: Candidate, token: Optional[Any]) -> str:
     return f"Concept {body}"
 
 def _compose_group_clue(candidate: Candidate, token: Optional[Any]) -> str:
-    # Handles words like â€œLevitesâ€, â€œPhariseesâ€, â€œCretansâ€, and nationality/ethnonyms (â€œ-itesâ€, â€œ-ansâ€)
+    # Handles words like "Levites", "Pharisees", "Cretans", and nationality/ethnonyms ("-ites", "-ans")
     snippet = summarize_context(token, candidate.word, CATEGORY_OBJECT)  # neutral phrasing
     if not snippet:
-        snippet = "people mentioned in this chapter"
-    # Safer opening than â€œFigureâ€: emphasize collectivity
-    return f"Collective group identified as {snippet}"
+        snippet = "mentioned in this chapter"
+    # Safer opening than "Figure": emphasize collectivity
+    return f"Collective group {snippet}"
 
 def knowledge_enriched_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
     doc = payload.doc
@@ -1785,136 +2071,4 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# --- restored helper: build_object_description ---
-def build_object_description(token: Any, answer: str) -> str:
-    """
-    Compose a short clause describing how the object participates in the sentence.
-    E.g., "disciples carry this", "is used at the feast", etc.
-    """
-    if token is None:
-        return ""
-    verb = None
-    preposition = None
-
-    # Direct object / attribute / prepositional object patterns
-    if token.dep_ in {"dobj", "obj"}:
-        verb = token.head
-    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
-        preposition = token.head
-        verb = preposition.head
-    elif token.dep_ == "attr":
-        verb = token.head
-    else:
-        # Walk up to find governing verb
-        for anc in token.ancestors:
-            if anc.pos_ == "VERB":
-                verb = anc
-                break
-
-    if verb is None:
-        return ""
-
-    subject = get_subject_phrase(verb, answer)
-    verb_phrase = build_verb_phrase(verb, answer)
-    # Prefer preposition if we really have one
-    if preposition is not None and subject:
-        return f"{subject} {verb_phrase} {preposition.text.lower()} this"
-    if subject and verb_phrase:
-        return f"{subject} {verb_phrase} this"
-    if verb_phrase:
-        return f"{verb_phrase.capitalize()} this"
-    return ""
-
-
-# --- restored helper: build_place_description ---
-def build_place_description(token: Any, answer: str) -> str:
-    """
-    Compose a clause about what happens AT/WITH the place.
-    E.g., "crowds gather at this place", "Jesus teaches at this place".
-    """
-    if token is None:
-        return ""
-    governing = None
-    preposition = None
-
-    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
-        preposition = token.head
-        governing = preposition.head
-    elif token.dep_ in {"nsubj", "nsubjpass"}:
-        governing = token.head
-    else:
-        for anc in token.ancestors:
-            if anc.pos_ == "VERB":
-                governing = anc
-                break
-
-    if governing is None:
-        return ""
-
-    subject = get_subject_phrase(governing, answer)
-    verb_phrase = build_verb_phrase(governing, answer)
-    if not verb_phrase:
-        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
-    prep_text = preposition.text.lower() if preposition is not None else "at"
-
-    if subject:
-        return f"{subject} {verb_phrase} {prep_text} this place"
-    return f"{verb_phrase.capitalize()} {prep_text} this place"
-
-
-# --- restored helper: build_theology_description ---
-def build_theology_description(token: Any, answer: str) -> str:
-    """
-    Compose a clause for concept/theology tokens using the governing verb,
-    subject phrase, or a relative clause if available.
-    """
-    if token is None:
-        return ""
-    verb = None
-
-    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
-        head = token.head
-        if head is not None and head.pos_ == "VERB":
-            verb = head
-    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
-        verb = token
-
-    if verb is not None:
-        subject = get_subject_phrase(verb, answer)
-        verb_phrase = build_verb_phrase(verb, answer)
-        if subject and verb_phrase:
-            return f"{subject} {verb_phrase}"
-        if verb_phrase:
-            return verb_phrase.capitalize()
-
-    if token.dep_ == "attr" and token.head.pos_ == "VERB":
-        subject = get_subject_phrase(token.head, answer)
-        verb_phrase = build_verb_phrase(token.head, answer)
-        if subject and verb_phrase:
-            return f"{subject} {verb_phrase}"
-
-    for child in token.children:
-        if child.dep_ == "relcl":
-            frag = format_subtree_tokens(child.subtree, answer)
-            if frag:
-                return frag
-    return ""
 
