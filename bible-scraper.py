@@ -1342,6 +1342,144 @@ def _compose_person_clue(candidate: Candidate, token: Optional[Any], processor: 
     raw = _enforce_category_opening(CATEGORY_PERSON, body, role_phrase=role_phrase)
     return raw
 
+
+def build_object_description(token: Any, answer: str) -> str:
+    """Compose a short clause describing how the object participates in the sentence."""
+    if token is None:
+        return ""
+    verb = None
+    preposition = None
+
+    # Direct object / attribute / prepositional object patterns
+    if token.dep_ in {"dobj", "obj"}:
+        verb = token.head
+    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        verb = preposition.head
+    elif token.dep_ == "attr":
+        verb = token.head
+    else:
+        # Walk up to find governing verb
+        for anc in token.ancestors:
+            if anc.pos_ == "VERB":
+                verb = anc
+                break
+
+    if verb is None:
+        return ""
+
+    subject = get_subject_phrase(verb, answer)
+    verb_phrase = build_verb_phrase(verb, answer)
+    # Prefer preposition if we really have one
+    verb_base = verb.lemma_.lower() if verb.lemma_ != "-PRON-" else verb.text.lower()
+    normalized_phrase = ""
+    if verb_phrase:
+        parts = verb_phrase.split()
+        if parts:
+            parts[0] = verb_base
+            normalized_phrase = " ".join(parts)
+    else:
+        normalized_phrase = verb_base
+
+    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
+        normalized_phrase = ""
+
+    segments: List[str] = []
+    if subject and normalized_phrase:
+        segments.append(f"{subject} {normalized_phrase}")
+    elif normalized_phrase:
+        segments.append(normalized_phrase)
+
+    if preposition is not None and segments:
+        segments[-1] = segments[-1] + f" {preposition.text.lower()}"
+
+    clause = " ".join(segments)
+    return sanitize_clause(clause)
+
+
+def build_place_description(token: Any, answer: str) -> str:
+    """Compose a clause about what happens at/with the place."""
+    if token is None:
+        return ""
+    governing = None
+    preposition = None
+
+    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        governing = preposition.head
+    elif token.dep_ in {"nsubj", "nsubjpass"}:
+        governing = token.head
+    else:
+        for anc in token.ancestors:
+            if anc.pos_ == "VERB":
+                governing = anc
+                break
+
+    if governing is None:
+        return ""
+
+    subject = get_subject_phrase(governing, answer)
+    verb_phrase = build_verb_phrase(governing, answer)
+    if not verb_phrase:
+        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
+
+    verb_base = governing.lemma_.lower() if governing.lemma_ != "-PRON-" else governing.text.lower()
+    normalized_phrase = ""
+    if verb_phrase:
+        parts = verb_phrase.split()
+        if parts:
+            parts[0] = verb_base
+            normalized_phrase = " ".join(parts)
+    else:
+        normalized_phrase = verb_base
+
+    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
+        normalized_phrase = ""
+
+    pieces: List[str] = []
+    if subject and normalized_phrase:
+        pieces.append(f"{subject} {normalized_phrase}")
+    elif normalized_phrase:
+        pieces.append(normalized_phrase)
+
+    clause = " ".join(pieces)
+    return sanitize_clause(clause)
+
+
+def build_theology_description(token: Any, answer: str) -> str:
+    """Compose a clause describing how the theology term functions in context."""
+    if token is None:
+        return ""
+    verb = None
+
+    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
+        head = token.head
+        if head is not None and head.pos_ == "VERB":
+            verb = head
+    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
+        verb = token
+
+    if verb is not None:
+        subject = get_subject_phrase(verb, answer)
+        verb_phrase = build_verb_phrase(verb, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+        if verb_phrase:
+            return verb_phrase.capitalize()
+
+    if token.dep_ == "attr" and token.head.pos_ == "VERB":
+        subject = get_subject_phrase(token.head, answer)
+        verb_phrase = build_verb_phrase(token.head, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+
+    for child in token.children:
+        if child.dep_ == "relcl":
+            frag = format_subtree_tokens(child.subtree, answer)
+            if frag:
+                return frag
+    return ""
+
 def _compose_place_clue(candidate: Candidate, token: Optional[Any]) -> str:
     body = build_place_description(token, candidate.word)
     if not body:
@@ -1835,158 +1973,6 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         results = process_book(book, payloads, processor, args.seed)
         write_book_output(book, results, out_dir, client.header_id, client.source_label, args.seed, timestamp)
     return 0
-
-
-
-
-# --- restored helper: build_object_description ---
-def build_object_description(token: Any, answer: str) -> str:
-    """
-    Compose a short clause describing how the object participates in the sentence.
-    E.g., "disciples carry this", "is used at the feast", etc.
-    """
-    if token is None:
-        return ""
-    verb = None
-    preposition = None
-
-    # Direct object / attribute / prepositional object patterns
-    if token.dep_ in {"dobj", "obj"}:
-        verb = token.head
-    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
-        preposition = token.head
-        verb = preposition.head
-    elif token.dep_ == "attr":
-        verb = token.head
-    else:
-        # Walk up to find governing verb
-        for anc in token.ancestors:
-            if anc.pos_ == "VERB":
-                verb = anc
-                break
-
-    if verb is None:
-        return ""
-
-    subject = get_subject_phrase(verb, answer)
-    verb_phrase = build_verb_phrase(verb, answer)
-    # Prefer preposition if we really have one
-    verb_base = verb.lemma_.lower() if verb.lemma_ != "-PRON-" else verb.text.lower()
-    normalized_phrase = ""
-    if verb_phrase:
-        parts = verb_phrase.split()
-        if parts:
-            parts[0] = verb_base
-            normalized_phrase = " ".join(parts)
-    else:
-        normalized_phrase = verb_base
-
-    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
-        normalized_phrase = ""
-
-    segments: List[str] = []
-    if subject and normalized_phrase:
-        segments.append(f"{subject} {normalized_phrase}")
-    elif normalized_phrase:
-        segments.append(normalized_phrase)
-
-    if preposition is not None and segments:
-        segments[-1] = segments[-1] + f" {preposition.text.lower()}"
-
-    clause = " ".join(segments)
-    return sanitize_clause(clause)
-
-
-# --- restored helper: build_place_description ---
-def build_place_description(token: Any, answer: str) -> str:
-    """
-    Compose a clause about what happens AT/WITH the place.
-    E.g., "crowds gather at this place", "Jesus teaches at this place".
-    """
-    if token is None:
-        return ""
-    governing = None
-    preposition = None
-
-    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
-        preposition = token.head
-        governing = preposition.head
-    elif token.dep_ in {"nsubj", "nsubjpass"}:
-        governing = token.head
-    else:
-        for anc in token.ancestors:
-            if anc.pos_ == "VERB":
-                governing = anc
-                break
-
-    if governing is None:
-        return ""
-
-    subject = get_subject_phrase(governing, answer)
-    verb_phrase = build_verb_phrase(governing, answer)
-    if not verb_phrase:
-        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
-
-    verb_base = governing.lemma_.lower() if governing.lemma_ != "-PRON-" else governing.text.lower()
-    normalized_phrase = ""
-    if verb_phrase:
-        parts = verb_phrase.split()
-        if parts:
-            parts[0] = verb_base
-            normalized_phrase = " ".join(parts)
-    else:
-        normalized_phrase = verb_base
-
-    if not subject and normalized_phrase and len(normalized_phrase.split()) == 1:
-        normalized_phrase = ""
-
-    pieces: List[str] = []
-    if subject and normalized_phrase:
-        pieces.append(f"{subject} {normalized_phrase}")
-    elif normalized_phrase:
-        pieces.append(normalized_phrase)
-
-    clause = " ".join(pieces)
-    return sanitize_clause(clause)
-
-
-# --- restored helper: build_theology_description ---
-def build_theology_description(token: Any, answer: str) -> str:
-    """
-    Compose a clause for concept/theology tokens using the governing verb,
-    subject phrase, or a relative clause if available.
-    """
-    if token is None:
-        return ""
-    verb = None
-
-    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
-        head = token.head
-        if head is not None and head.pos_ == "VERB":
-            verb = head
-    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
-        verb = token
-
-    if verb is not None:
-        subject = get_subject_phrase(verb, answer)
-        verb_phrase = build_verb_phrase(verb, answer)
-        if subject and verb_phrase:
-            return f"{subject} {verb_phrase}"
-        if verb_phrase:
-            return verb_phrase.capitalize()
-
-    if token.dep_ == "attr" and token.head.pos_ == "VERB":
-        subject = get_subject_phrase(token.head, answer)
-        verb_phrase = build_verb_phrase(token.head, answer)
-        if subject and verb_phrase:
-            return f"{subject} {verb_phrase}"
-
-    for child in token.children:
-        if child.dep_ == "relcl":
-            frag = format_subtree_tokens(child.subtree, answer)
-            if frag:
-                return frag
-    return ""
 
 
 if __name__ == "__main__":
