@@ -469,7 +469,10 @@ BANNED_WORDS: Set[str] = {
     "ALSO",
     "EVEN",
     "JUST",
+    "INTERJECTION",
+    "EXCLAMATION",    # optional extra guard
 }
+
 
 THEOLOGICAL_TERMS: Set[str] = {
     "ATONEMENT",
@@ -683,12 +686,26 @@ def sanitize_clause(text: str) -> str:
 
 
 def remove_answer_from_clue(clue: str, answer: str) -> str:
-    if not clue:
+    """
+    Remove the answer token (and simple inflections) from a clue.
+    Handles case-insensitive matches, plural/possessive endings, and
+    avoids stripping inside other words.
+    """
+    if not clue or not answer:
         return clue
-    pattern = re.compile(re.escape(answer), re.IGNORECASE)
-    cleaned = pattern.sub("", clue)
+
+    # Build a pattern that removes: answer, answers, answer's, answers'
+    core = re.escape(answer)
+    # Allow optional hyphen or space before inflection (e.g., "Levite-s", rare but safe)
+    pat = rf"(?<!\w){core}(?:['’]s|s|es)?(?!\w)"
+    cleaned = re.sub(pat, "", clue, flags=re.IGNORECASE)
+
+    # Collapse leftover punctuation/space noise
     cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip(",;:. ").strip()
+    cleaned = re.sub(r"\s*([,;:.])\s*", r"\1 ", cleaned)
+    cleaned = cleaned.strip(" ,;:.-")
+    return cleaned
+
 
 def _backfill_bare_function_words(text: str) -> str:
     if not text:
@@ -975,7 +992,17 @@ def gather_synset_lemmas(processor: TextProcessor, lemma: str, pos: str) -> Set[
 def classify_candidate(token: Any, word: str, lemma: str) -> str:
     upper_word = normalize_upper(word)
     upper_lemma = normalize_upper(lemma)
-    ent_type = token.ent_type_ if token is not None else ""
+
+    # Guard: if spaCy didn't give us a token, fall back safely.
+    if token is None:
+        return CATEGORY_OTHER
+
+    # Hard block unsupported/noisy POS so they never surface as answers.
+    # (INTJ = interjection, SYM = symbols, X = unknown, SPACE = spaces)
+    if token.pos_ in {"INTJ", "SYM", "X", "SPACE"}:
+        return CATEGORY_OTHER
+
+    ent_type = token.ent_type_
     if ent_type == "PERSON" or upper_word in KNOWN_PEOPLE or upper_lemma in KNOWN_PEOPLE:
         return CATEGORY_PERSON
     if ent_type in {"GPE", "LOC", "FAC"} or upper_word in KNOWN_PLACES:
@@ -984,8 +1011,8 @@ def classify_candidate(token: Any, word: str, lemma: str) -> str:
         return CATEGORY_OBJECT
     if upper_word in THEOLOGICAL_TERMS or upper_lemma in THEOLOGICAL_TERMS:
         return CATEGORY_THEOLOGY
-    if token is None:
-        return CATEGORY_OTHER
+
+    # Backoffs by POS
     if token.pos_ == "PROPN":
         if upper_word in KNOWN_PLACES:
             return CATEGORY_PLACE
@@ -1218,222 +1245,131 @@ def extract_verb_phrases(token: Any, answer: str) -> List[str]:
     return phrases
 
 
-def generate_person_clue(
-    candidate: Candidate,
-    processor: TextProcessor,
-    payload: ChapterPayload,
-    existing_signatures: Set[str],
-) -> str:
-    doc = payload.doc
-    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
+def _is_collective_group_token(word: str) -> bool:
+    if not word:
+        return False
+    w = normalize_upper(word)
+    if not w:
+        return False
+    if w.endswith(("ITES", "ANS", "EANS", "IANS")):
+        return True
+    return w in {
+        "PHARISEES","SADDUCEES","SCRIBES","LEVITES","CRETANS","ROMANS","GENTILES","JEWS","DISCIPLES"
+    }
+
+THEOLOGICAL_GLOSSES: Dict[str, str] = {
+    "GRACE": "unearned favor",
+    "FAITH": "trust and belief",
+    "LAW": "commands of God",
+    "KINGDOM": "reign and rule",
+    "RESURRECTION": "rising from death",
+    "COVENANT": "binding promise",
+    "ATONEMENT": "reconciliation with God",
+    "SPIRIT": "Godâ€™s empowering presence",
+    "TRUTH": "what accords with God",
+    "SALVATION": "deliverance from sin",
+}
+
+def _compose_person_clue(candidate: Candidate, token: Optional[Any], processor: "TextProcessor", payload: ChapterPayload) -> str:
+    # Role inference uses your existing knowledge maps & rules
     context_words: Set[str] = set()
     if token is not None:
-        for word in token.sent:
-            norm = processor.normalize_token(word.text)
-            if norm:
-                context_words.add(norm)
+        for t in token.sent:
+            n = processor.normalize_token(t.text)
+            if n:
+                context_words.add(n)
     role = infer_role(candidate.word, context_words, payload.vocab)
     role_phrase = (role.capitalize() if role and role.lower() not in {"man", "woman"} else "Figure")
     verb_phrases = candidate.context_phrases or (extract_verb_phrases(token, candidate.word) if token else [])
-    hints = extract_hint_phrases(context_words)
-    clue_body = ""
     if verb_phrases:
-        clue_body = verb_phrases[0]
-        if hints and hints[0] not in clue_body:
-            clue_body = f"{clue_body}, {hints[0]}"
+        body = verb_phrases[0]
     else:
-        summary = summarize_context(token, candidate.word, CATEGORY_PERSON)
-        if summary:
-            clue_body = summary
-    if not clue_body:
-        clue_body = "plays a key role in this chapter"
-    clue_raw = _enforce_category_opening(CATEGORY_PERSON, clue_body, role_phrase=role_phrase)
-    clue = remove_answer_from_clue(clue_raw, candidate.word)
-    clue = finalize_clue(clue)
-    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+        body = summarize_context(token, candidate.word, CATEGORY_PERSON) or "plays a key role in this chapter"
+    raw = _enforce_category_opening(CATEGORY_PERSON, body, role_phrase=role_phrase)
+    return raw
 
+def _compose_place_clue(candidate: Candidate, token: Optional[Any]) -> str:
+    body = build_place_description(token, candidate.word)
+    if not body:
+        body = summarize_context(token, candidate.word, CATEGORY_PLACE) or "is a location highlighted in this chapter"
+    return _enforce_category_opening(CATEGORY_PLACE, body)
 
-def build_place_description(token: Any, answer: str) -> str:
-    if token is None:
-        return ""
-    governing = None
-    preposition = None
-    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
-        preposition = token.head
-        governing = preposition.head
-    elif token.dep_ in {"nsubj", "nsubjpass"}:
-        governing = token.head
+def _compose_object_clue(candidate: Candidate, token: Optional[Any]) -> str:
+    body = build_object_description(token, candidate.word)
+    if not body:
+        body = summarize_context(token, candidate.word, CATEGORY_OBJECT) or "object highlighted in this passage"
+    return _enforce_category_opening(CATEGORY_OBJECT, body, object_hypernym="object")
+
+def _compose_theology_clue(candidate: Candidate, token: Optional[Any]) -> str:
+    # Prefer a brief gloss if we recognize the theological term; fall back to context
+    lemma_up = normalize_upper(candidate.lemma)
+    gloss = THEOLOGICAL_GLOSSES.get(lemma_up)
+    if gloss:
+        body = f"core theme: {gloss}"
     else:
-        for ancestor in token.ancestors:
-            if ancestor.pos_ == "VERB":
-                governing = ancestor
-                break
-    if governing is None:
-        return ""
-    subject = get_subject_phrase(governing, answer)
-    verb_phrase = build_verb_phrase(governing, answer)
-    if not verb_phrase:
-        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
-    prep_text = preposition.text.lower() if preposition is not None else "at"
-    if subject:
-        return f"{subject} {verb_phrase} {prep_text} this place"
-    return f"{verb_phrase.capitalize()} {prep_text} this place"
+        body = build_theology_description(token, candidate.word) or summarize_context(token, candidate.word, CATEGORY_THEOLOGY) or "key theme in this chapter"
+    # Keep lead-in neutral (Concept ...)
+    return f"Concept {body}"
 
+def _compose_group_clue(candidate: Candidate, token: Optional[Any]) -> str:
+    # Handles words like â€œLevitesâ€, â€œPhariseesâ€, â€œCretansâ€, and nationality/ethnonyms (â€œ-itesâ€, â€œ-ansâ€)
+    snippet = summarize_context(token, candidate.word, CATEGORY_OBJECT)  # neutral phrasing
+    if not snippet:
+        snippet = "people mentioned in this chapter"
+    # Safer opening than â€œFigureâ€: emphasize collectivity
+    return f"Collective group identified as {snippet}"
 
-def generate_place_clue(
-    candidate: Candidate,
-    processor: TextProcessor,
-    payload: ChapterPayload,
-    existing_signatures: Set[str],
-) -> str:
+def knowledge_enriched_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
     doc = payload.doc
     token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
-    description = build_place_description(token, candidate.word)
-    if not description:
-        summary = summarize_context(token, candidate.word, CATEGORY_PLACE)
-        if summary:
-            description = summary
-    if not description:
-        description = "is a location highlighted in this chapter"
-    clue_raw = _enforce_category_opening(CATEGORY_PLACE, description)
-    clue = remove_answer_from_clue(clue_raw, candidate.word)
-    clue = finalize_clue(clue)
-    return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
+    # Determine effective kind (respect current categories, but detect collectives)
+    effective = candidate.category
+    if effective in {CATEGORY_OBJECT, CATEGORY_PERSON, CATEGORY_OTHER} and _is_collective_group_token(candidate.word):
+        # Re-route collectives to the group composer
+        effective = "GROUP"
 
-def build_object_description(token: Any, answer: str) -> str:
-    if token is None:
-        return ""
-    verb = None
-    preposition = None
-    if token.dep_ in {"dobj", "obj"}:
-        verb = token.head
-    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
-        preposition = token.head
-        verb = preposition.head
-    elif token.dep_ == "attr":
-        verb = token.head
+    if effective == CATEGORY_PERSON:
+        raw = _compose_person_clue(candidate, token, processor, payload)
+    elif effective == CATEGORY_PLACE:
+        raw = _compose_place_clue(candidate, token)
+    elif effective == CATEGORY_OBJECT:
+        raw = _compose_object_clue(candidate, token)
+    elif effective == CATEGORY_THEOLOGY:
+        raw = _compose_theology_clue(candidate, token)
+    elif effective == "GROUP":
+        raw = _compose_group_clue(candidate, token)
     else:
-        for ancestor in token.ancestors:
-            if ancestor.pos_ == "VERB":
-                verb = ancestor
-                break
-    if verb is None:
-        return ""
-    subject = get_subject_phrase(verb, answer)
-    verb_phrase = build_verb_phrase(verb, answer)
-    if preposition is not None and subject:
-        return f"{subject} {verb_phrase} {preposition.text.lower()} this"
-    if subject and verb_phrase:
-        return f"{subject} {verb_phrase} this"
-    if verb_phrase:
-        return f"{verb_phrase.capitalize()} this"
-    return ""
+        # Generic fallback
+        body = summarize_context(token, candidate.word, CATEGORY_OTHER) or "mentioned in this chapter"
+        raw = body
 
-
-def generate_object_clue(
-    candidate: Candidate,
-    processor: TextProcessor,
-    payload: ChapterPayload,
-    existing_signatures: Set[str],
-) -> str:
-    doc = payload.doc
-    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
-    description = build_object_description(token, candidate.word)
-    if not description:
-        summary = summarize_context(token, candidate.word, CATEGORY_OBJECT)
-        if summary:
-            description = summary
-    if not description:
-        description = "object highlighted in this passage"
-    clue_raw = _enforce_category_opening(CATEGORY_OBJECT, description, object_hypernym="object")
-    clue = remove_answer_from_clue(clue_raw, candidate.word)
+    # Safety: remove answer, normalize grammar, finalize
+    clue = remove_answer_from_clue(raw, candidate.word)
+    clue = _normalize_grammar(clue)
     clue = finalize_clue(clue)
+    # Ensure varied openings/signatures to avoid near-duplicates
     return ensure_unique_structure(clue, token, candidate, existing_signatures)
 
+# === Public surface: swap in our single entry point ===
+def generate_person_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
+    return knowledge_enriched_clue(candidate, processor, payload, existing_signatures)
 
-def build_theology_description(token: Any, answer: str) -> str:
-    if token is None:
-        return ""
-    verb = None
-    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
-        head = token.head
-        if head is not None and head.pos_ == "VERB":
-            verb = head
-    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
-        verb = token
-    if verb is not None:
-        subject = get_subject_phrase(verb, answer)
-        verb_phrase = build_verb_phrase(verb, answer)
-        if subject and verb_phrase:
-            return f"{subject} {verb_phrase}"
-        if verb_phrase:
-            return f"{verb_phrase.capitalize()}"
-    if token.dep_ == "attr" and token.head.pos_ == "VERB":
-        subject = get_subject_phrase(token.head, answer)
-        verb_phrase = build_verb_phrase(token.head, answer)
-        if subject and verb_phrase:
-            return f"{subject} {verb_phrase}"
-    for child in token.children:
-        if child.dep_ == "relcl":
-            fragment = format_subtree_tokens(child.subtree, answer)
-            if fragment:
-                return fragment
-    return ""
+def generate_place_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
+    return knowledge_enriched_clue(candidate, processor, payload, existing_signatures)
 
+def generate_object_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
+    return knowledge_enriched_clue(candidate, processor, payload, existing_signatures)
 
-def generate_theology_clue(
-    candidate: Candidate,
-    processor: TextProcessor,
-    payload: ChapterPayload,
-    existing_signatures: Set[str],
-) -> str:
-    doc = payload.doc
-    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
-    description = build_theology_description(token, candidate.word)
-    if not description:
-        summary = summarize_context(token, candidate.word, CATEGORY_THEOLOGY)
-        if summary:
-            description = summary
-    if not description:
-        description = "key theme in this chapter"
-    clue = f"Concept {description}"
-    clue = remove_answer_from_clue(clue, candidate.word)
-    clue = finalize_clue(clue)
-    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+def generate_theology_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
+    return knowledge_enriched_clue(candidate, processor, payload, existing_signatures)
 
+def generate_generic_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
+    return knowledge_enriched_clue(candidate, processor, payload, existing_signatures)
 
-def generate_generic_clue(
-    candidate: Candidate,
-    processor: TextProcessor,
-    payload: ChapterPayload,
-    existing_signatures: Set[str],
-) -> str:
-    doc = payload.doc
-    token = doc[candidate.token_index] if doc is not None and 0 <= candidate.token_index < len(doc) else None
-    summary = summarize_context(token, candidate.word, CATEGORY_OTHER)
-    if not summary:
-        summary = "mentioned in this chapter"
-    clue = remove_answer_from_clue(summary, candidate.word)
-    clue = finalize_clue(clue)
-    return ensure_unique_structure(clue, token, candidate, existing_signatures)
+def generate_clue(candidate: Candidate, processor: "TextProcessor", payload: ChapterPayload, existing_signatures: Set[str]) -> str:
+    return knowledge_enriched_clue(candidate, processor, payload, existing_signatures)
 
-
-def generate_clue(
-    candidate: Candidate,
-    processor: TextProcessor,
-    payload: ChapterPayload,
-    existing_signatures: Set[str],
-) -> str:
-    if candidate.category == CATEGORY_PERSON:
-        return generate_person_clue(candidate, processor, payload, existing_signatures)
-    if candidate.category == CATEGORY_PLACE:
-        return generate_place_clue(candidate, processor, payload, existing_signatures)
-    if candidate.category == CATEGORY_OBJECT:
-        return generate_object_clue(candidate, processor, payload, existing_signatures)
-    if candidate.category == CATEGORY_THEOLOGY:
-        return generate_theology_clue(candidate, processor, payload, existing_signatures)
-    return generate_generic_clue(candidate, processor, payload, existing_signatures)
 def parse_books(book_str: Optional[str]) -> List[BookMetadata]:
     if not book_str:
         return BOOKS
@@ -1860,4 +1796,125 @@ if __name__ == "__main__":
 
 
 
+
+
+
+
+
+
+
+# --- restored helper: build_object_description ---
+def build_object_description(token: Any, answer: str) -> str:
+    """
+    Compose a short clause describing how the object participates in the sentence.
+    E.g., "disciples carry this", "is used at the feast", etc.
+    """
+    if token is None:
+        return ""
+    verb = None
+    preposition = None
+
+    # Direct object / attribute / prepositional object patterns
+    if token.dep_ in {"dobj", "obj"}:
+        verb = token.head
+    elif token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        verb = preposition.head
+    elif token.dep_ == "attr":
+        verb = token.head
+    else:
+        # Walk up to find governing verb
+        for anc in token.ancestors:
+            if anc.pos_ == "VERB":
+                verb = anc
+                break
+
+    if verb is None:
+        return ""
+
+    subject = get_subject_phrase(verb, answer)
+    verb_phrase = build_verb_phrase(verb, answer)
+    # Prefer preposition if we really have one
+    if preposition is not None and subject:
+        return f"{subject} {verb_phrase} {preposition.text.lower()} this"
+    if subject and verb_phrase:
+        return f"{subject} {verb_phrase} this"
+    if verb_phrase:
+        return f"{verb_phrase.capitalize()} this"
+    return ""
+
+
+# --- restored helper: build_place_description ---
+def build_place_description(token: Any, answer: str) -> str:
+    """
+    Compose a clause about what happens AT/WITH the place.
+    E.g., "crowds gather at this place", "Jesus teaches at this place".
+    """
+    if token is None:
+        return ""
+    governing = None
+    preposition = None
+
+    if token.dep_ == "pobj" and token.head.pos_ == "ADP":
+        preposition = token.head
+        governing = preposition.head
+    elif token.dep_ in {"nsubj", "nsubjpass"}:
+        governing = token.head
+    else:
+        for anc in token.ancestors:
+            if anc.pos_ == "VERB":
+                governing = anc
+                break
+
+    if governing is None:
+        return ""
+
+    subject = get_subject_phrase(governing, answer)
+    verb_phrase = build_verb_phrase(governing, answer)
+    if not verb_phrase:
+        verb_phrase = third_person(governing.lemma_ if governing.lemma_ != "-PRON-" else governing.text)
+    prep_text = preposition.text.lower() if preposition is not None else "at"
+
+    if subject:
+        return f"{subject} {verb_phrase} {prep_text} this place"
+    return f"{verb_phrase.capitalize()} {prep_text} this place"
+
+
+# --- restored helper: build_theology_description ---
+def build_theology_description(token: Any, answer: str) -> str:
+    """
+    Compose a clause for concept/theology tokens using the governing verb,
+    subject phrase, or a relative clause if available.
+    """
+    if token is None:
+        return ""
+    verb = None
+
+    if token.dep_ in {"pobj", "dobj", "obj", "attr", "acomp", "oprd"}:
+        head = token.head
+        if head is not None and head.pos_ == "VERB":
+            verb = head
+    if verb is None and token.dep_ == "ROOT" and token.pos_ == "VERB":
+        verb = token
+
+    if verb is not None:
+        subject = get_subject_phrase(verb, answer)
+        verb_phrase = build_verb_phrase(verb, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+        if verb_phrase:
+            return verb_phrase.capitalize()
+
+    if token.dep_ == "attr" and token.head.pos_ == "VERB":
+        subject = get_subject_phrase(token.head, answer)
+        verb_phrase = build_verb_phrase(token.head, answer)
+        if subject and verb_phrase:
+            return f"{subject} {verb_phrase}"
+
+    for child in token.children:
+        if child.dep_ == "relcl":
+            frag = format_subtree_tokens(child.subtree, answer)
+            if frag:
+                return frag
+    return ""
 
